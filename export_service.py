@@ -8,6 +8,13 @@ from models import CartItem, Order, PhotoPath
 from printing_service import PrintingService
 
 
+def _safe_qty(qty_str: str) -> float:
+    """Return the numeric quantity from a string, or 0.0 on any parse error."""
+    try:
+        return float(qty_str or 0)
+    except (ValueError, TypeError):
+        return 0.0
+
 @dataclass
 class DownloadTask:
     url: str
@@ -31,7 +38,7 @@ class ExportService:
     ) -> List[DownloadTask]:
         tasks: List[DownloadTask] = []
         for order in selected_orders:
-            items = [item for item in cart_items if item.order_id == order.id and float(item.qty) > 0]
+            items = [item for item in cart_items if item.order_id == order.id and _safe_qty(item.qty) > 0]
             for item in items:
                 photo = photo_paths.get(str(item.pic_id))
                 if not photo:
@@ -51,7 +58,7 @@ class ExportService:
                     prefix=prefix,
                     name_base=name_base,
                     ext=ext,
-                    qty=int(float(item.qty)),
+                    qty=max(1, int(_safe_qty(item.qty))),
                 ))
         return tasks
 
