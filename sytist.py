@@ -1,4 +1,5 @@
 import io
+import logging
 import os
 import threading
 import tkinter as tk
@@ -12,7 +13,7 @@ from config_store import ConfigStore
 from dashboard_state import DashboardStateStore
 from data_loader import HAS_MYSQL, SytistDataLoader
 from dialogs import Dialogs
-from export_service import ExportService
+from export_service import ExportService, _safe_qty
 from models import CartItem, Order, PhotoPath, PrintJob
 from printing_service import HAS_PIL, HAS_WIN32, PrintingService
 
@@ -21,6 +22,16 @@ try:
 except ImportError:
     Image = None
     ImageTk = None
+
+try:
+    import keyring
+    HAS_KEYRING = True
+except ImportError:
+    HAS_KEYRING = False
+
+logger = logging.getLogger(__name__)
+
+_KEYRING_SERVICE = "sytist_dashboard"
 
 DASHBOARD_STATUSES = [
     "New",
@@ -57,6 +68,27 @@ class SytistDashboard:
         self.photo_paths: dict[str, PhotoPath] = {}
         self.order_status_lookup: dict[str, dict] = {}
 
+    # ------------------------------------------------------------------
+    # Keyring helpers — passwords are stored in the OS credential store
+    # (via the optional `keyring` package) and never written to JSON.
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _keyring_get(preset_name: str) -> str:
+        if HAS_KEYRING:
+            try:
+                return keyring.get_password(_KEYRING_SERVICE, preset_name) or ""
+            except Exception as exc:
+                logger.warning("Could not read password from keyring: %s", exc)
+        return ""
+
+    @staticmethod
+    def _keyring_set(preset_name: str, password: str) -> None:
+        if HAS_KEYRING:
+            try:
+                keyring.set_password(_KEYRING_SERVICE, preset_name, password)
+            except Exception as exc:
+                logger.warning("Could not save password to keyring: %s", exc)
         self.setup_ui()
         self.refresh_domain_ui()
         self.apply_selected_preset_to_runtime()
@@ -530,7 +562,7 @@ class SytistDashboard:
 
         top = tk.Toplevel(self.root)
         top.title(f"Live Sytist Connection - {preset_name}")
-        top.geometry("360x330")
+        top.geometry("360x370")
         top.transient(self.root)
         top.grab_set()
 
@@ -552,13 +584,26 @@ class SytistDashboard:
         user_entry.insert(0, preset.get("db_user", ""))
         user_entry.pack(fill=tk.X, padx=20)
 
+        # Load password from the OS keyring; fall back to in-memory value (which
+        # is never written to disk — see ConfigStore.save).
+        saved_pass = self._keyring_get(preset_name) or preset.get("db_pass", "")
         ttk.Label(top, text="Password:").pack(pady=2)
         pass_entry = ttk.Entry(top, show="*")
-        pass_entry.insert(0, preset.get("db_pass", ""))
+        pass_entry.insert(0, saved_pass)
         pass_entry.pack(fill=tk.X, padx=20)
+
+        if HAS_KEYRING:
+            ttk.Label(top, text="Password stored in OS keyring.", foreground="gray").pack(pady=(0, 2))
+        else:
+            ttk.Label(
+                top,
+                text="Install 'keyring' to store the password securely.",
+                foreground="orange",
+            ).pack(pady=(0, 2))
 
         def connect_live():
             try:
+                password = pass_entry.get()
                 domain = self.domain_var.get().strip()
                 self.ensure_domain_in_favorites(domain)
                 self.config["domain"] = domain
@@ -567,15 +612,19 @@ class SytistDashboard:
                     "host": host_entry.get().strip(),
                     "db_name": db_entry.get().strip(),
                     "db_user": user_entry.get().strip(),
-                    "db_pass": pass_entry.get(),
+                    # Keep db_pass in memory so the dialog can pre-fill it next
+                    # time, but it will NOT be written to JSON by ConfigStore.save.
+                    "db_pass": password,
                 }
                 self.config["selected_preset"] = preset_name
+                # Persist password to OS keyring (if available).
+                self._keyring_set(preset_name, password)
                 self.save_config()
 
                 orders, cart_items, photo_paths, status_lookup = self.data_loader.load_live_db(
                     host=host_entry.get().strip(),
                     user=user_entry.get().strip(),
-                    password=pass_entry.get(),
+                    password=password,
                     database=db_entry.get().strip(),
                 )
                 self.set_data(orders, cart_items, photo_paths, status_lookup)
@@ -801,20 +850,28 @@ class SytistDashboard:
 
         self.save_current_domain_to_selected_preset()
         self.save_config()
-        threading.Thread(target=self.process_downloads, args=(selected_orders, base_dir), daemon=True).start()
 
-    def process_downloads(self, selected_orders, base_dir):
+        # Capture the domain on the main thread before handing off to a worker.
+        domain = self.domain_var.get().rstrip('/')
+
+        # Build the progress window here (main thread) so Tkinter stays happy.
         prog_win = tk.Toplevel(self.root)
         prog_win.title("Processing Orders")
         prog_win.geometry("400x150")
-
         ttk.Label(prog_win, text="Downloading and Packing Images...").pack(pady=10)
         progress_var = tk.DoubleVar()
         ttk.Progressbar(prog_win, variable=progress_var, maximum=100).pack(fill=tk.X, padx=20, pady=10)
         status_label = ttk.Label(prog_win, text="Starting...")
         status_label.pack()
 
-        domain = self.domain_var.get().rstrip('/')
+        threading.Thread(
+            target=self._download_worker,
+            args=(selected_orders, base_dir, domain, prog_win, status_label, progress_var),
+            daemon=True,
+        ).start()
+
+    def _download_worker(self, selected_orders, base_dir, domain, prog_win, status_label, progress_var):
+        """Background thread: download photos and update the progress window via after()."""
         tasks = self.export_service.build_download_tasks(
             selected_orders=selected_orders,
             cart_items=self.cart_items,
@@ -823,16 +880,19 @@ class SytistDashboard:
         )
 
         if not tasks:
-            status_label.config(text="No valid items to download.")
+            self.root.after(0, lambda: status_label.config(text="No valid items to download."))
             return
 
         def progress_callback(index, total, task):
-            status_label.config(text=f"Downloading {task.name_base}...")
-            progress_var.set((index / total) * 100)
-            self.root.update()
+            name = task.name_base
+            pct = (index / total) * 100
+            self.root.after(0, lambda n=name, p=pct: (
+                status_label.config(text=f"Downloading {n}..."),
+                progress_var.set(p),
+            ))
 
         def error_callback(task, exc):
-            print(f"Failed to download {task.url}: {exc}")
+            logger.warning("Failed to download %s: %s", task.url, exc)
 
         self.export_service.process_downloads(
             tasks=tasks,
@@ -841,21 +901,24 @@ class SytistDashboard:
             error_callback=error_callback,
         )
 
-        status_label.config(text="Done! You can import to Lightroom.")
-        ttk.Button(prog_win, text="Close", command=prog_win.destroy).pack(pady=10)
+        def _finish():
+            status_label.config(text="Done! You can import to Lightroom.")
+            ttk.Button(prog_win, text="Close", command=prog_win.destroy).pack(pady=10)
+
+        self.root.after(0, _finish)
 
     def build_order_print_jobs(self, selected_orders):
         jobs = []
         domain = self.domain_var.get().rstrip('/')
         for order in selected_orders:
-            items = [i for i in self.cart_items if i.order_id == order.id and float(i.qty) > 0]
+            items = [i for i in self.cart_items if i.order_id == order.id and _safe_qty(i.qty) > 0]
             for item in items:
                 photo = self.photo_paths.get(str(item.pic_id))
                 if not photo:
                     continue
                 url = f"{domain}/sy-photos/{photo.folder}/{photo.hashed_file}"
                 size_key = self.printing_service.detect_size_key_for_order_item(item)
-                qty = int(float(item.qty))
+                qty = max(1, int(_safe_qty(item.qty)))
                 for _ in range(qty):
                     jobs.append(PrintJob(
                         source_type="url",
@@ -923,26 +986,23 @@ class SytistDashboard:
         self.save_config()
         all_resolved, unresolved, resolved_count = self.printing_service.analyze_jobs_for_routing(jobs)
 
-        if all_resolved:
-            threading.Thread(target=self._execute_print_jobs, args=(jobs, None), daemon=True).start()
-            return
+        if not all_resolved:
+            printers = self.printing_service.get_installed_printers()
+            if not printers:
+                messagebox.showerror("Error", "No printers found on this system.")
+                return
 
-        printers = self.printing_service.get_installed_printers()
-        if not printers:
-            messagebox.showerror("Error", "No printers found on this system.")
-            return
+            fallback_printer = self.dialogs.ask_fallback_printer(title_text, printers, unresolved, resolved_count)
+            if not fallback_printer:
+                messagebox.showerror("Error", "Please select a fallback printer.")
+                return
+        else:
+            fallback_printer = None
 
-        fallback_printer = self.dialogs.ask_fallback_printer(title_text, printers, unresolved, resolved_count)
-        if not fallback_printer:
-            messagebox.showerror("Error", "Please select a fallback printer.")
-            return
-        threading.Thread(target=self._execute_print_jobs, args=(jobs, fallback_printer), daemon=True).start()
-
-    def _execute_print_jobs(self, jobs, fallback_printer):
+        # Build the progress window on the main thread before spawning the worker.
         prog_win = tk.Toplevel(self.root)
         prog_win.title("Direct Print Spooler")
         prog_win.geometry("700x220")
-
         status_label = ttk.Label(prog_win, text="Preparing print jobs...")
         status_label.pack(padx=20, pady=10)
         detail_label = ttk.Label(prog_win, text="")
@@ -950,6 +1010,14 @@ class SytistDashboard:
         result_label = ttk.Label(prog_win, text="")
         result_label.pack(padx=20, pady=5)
 
+        threading.Thread(
+            target=self._execute_print_jobs,
+            args=(jobs, fallback_printer, prog_win, status_label, detail_label, result_label),
+            daemon=True,
+        ).start()
+
+    def _execute_print_jobs(self, jobs, fallback_printer, prog_win, status_label, detail_label, result_label):
+        """Background thread: execute print jobs and update the progress window via after()."""
         total = len(jobs)
         success_count = 0
         fail_count = 0
@@ -962,24 +1030,31 @@ class SytistDashboard:
                 fail_count += 1
                 continue
 
-            status_label.config(text=f"Printing job {index} of {total}")
-            detail_label.config(text=f"{job.display_name} | size={size_key or 'UNKNOWN'} | printer={target_printer}")
-            self.root.update()
+            _idx, _name, _size, _printer = index, job.display_name, size_key or "UNKNOWN", target_printer
+            self.root.after(0, lambda i=_idx, n=_name, s=_size, p=_printer: (
+                status_label.config(text=f"Printing job {i} of {total}"),
+                detail_label.config(text=f"{n} | size={s} | printer={p}"),
+            ))
 
             try:
                 self.printing_service.execute_print_job(job, fallback_printer)
                 success_count += 1
             except Exception as e:
                 fail_count += 1
-                print(f"Failed to print {job.display_name} on {target_printer}: {e}")
+                logger.warning("Failed to print %s on %s: %s", job.display_name, target_printer, e)
 
-            result_label.config(text=f"Sent: {success_count} Failed: {fail_count}")
-            self.root.update()
+            _s, _f = success_count, fail_count
+            self.root.after(0, lambda s=_s, f=_f: result_label.config(text=f"Sent: {s} Failed: {f}"))
 
-        status_label.config(text="Printing complete.")
-        detail_label.config(text="Check the Windows print queues for final spooler status.")
-        result_label.config(text=f"Sent: {success_count} of {total} Failed: {fail_count}")
-        ttk.Button(prog_win, text="Close", command=prog_win.destroy).pack(pady=10)
+        _s, _f, _t = success_count, fail_count, total
+
+        def _finish():
+            status_label.config(text="Printing complete.")
+            detail_label.config(text="Check the Windows print queues for final spooler status.")
+            result_label.config(text=f"Sent: {_s} of {_t} Failed: {_f}")
+            ttk.Button(prog_win, text="Close", command=prog_win.destroy).pack(pady=10)
+
+        self.root.after(0, _finish)
 
 
 if __name__ == "__main__":

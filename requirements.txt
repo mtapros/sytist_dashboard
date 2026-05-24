@@ -1,0 +1,19 @@
+# Sytist Order Dashboard — Python dependencies
+#
+# Core: Python 3.10+ with tkinter (bundled with most Python distributions).
+# All packages below are optional; the app will run in a degraded mode if any
+# are absent and will display an informative error when the feature is used.
+
+# Live MySQL / MariaDB connection
+mysql-connector-python>=8.0.0
+
+# Image preview in the UI and direct-print rendering
+Pillow>=10.0.0
+
+# Direct printing via the Windows GDI spooler (Windows only)
+pywin32>=306
+
+# Secure OS-keyring storage for database passwords
+# Without this package, passwords are held in memory only and must be
+# re-entered each session.
+keyring>=24.0.0

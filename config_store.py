@@ -2,12 +2,12 @@ import json
 import os
 from copy import deepcopy
 
-DEFAULT_DOMAIN = "https://www.eagleactionpics.com"
+DEFAULT_DOMAIN = ""
 DEFAULT_PRESET_NAME = "Default"
 
 DEFAULT_CONFIG = {
     "domain": DEFAULT_DOMAIN,
-    "domain_favorites": [DEFAULT_DOMAIN],
+    "domain_favorites": [],
     "selected_preset": DEFAULT_PRESET_NAME,
     "db_presets": {
         DEFAULT_PRESET_NAME: {
@@ -15,7 +15,6 @@ DEFAULT_CONFIG = {
             "host": "",
             "db_name": "",
             "db_user": "",
-            "db_pass": "",
         }
     },
     "printer_routes": {
@@ -49,9 +48,13 @@ class ConfigStore:
 
     def save(self, config):
         self._normalize(config)
+        # Never write DB passwords to disk; they are managed via keyring.
+        data = deepcopy(config)
+        for preset in data.get("db_presets", {}).values():
+            preset.pop("db_pass", None)
         try:
             with open(self.path, "w", encoding="utf-8") as f:
-                json.dump(config, f, indent=4)
+                json.dump(data, f, indent=4)
         except Exception as e:
             print("Could not save config file:", e)
 
@@ -80,7 +83,8 @@ class ConfigStore:
                 "host": config.get("host", ""),
                 "db_name": config.get("db_name", ""),
                 "db_user": config.get("db_user", ""),
-                "db_pass": config.get("db_pass", ""),
+                # db_pass is intentionally not migrated to disk; callers handle
+                # keyring migration when the user next connects.
             })
 
         if not config["db_presets"]:
@@ -97,13 +101,15 @@ class ConfigStore:
             preset.setdefault("host", "")
             preset.setdefault("db_name", "")
             preset.setdefault("db_user", "")
+            # db_pass is held in memory only (loaded from keyring by the UI layer);
+            # it is never written to the JSON config file.
             preset.setdefault("db_pass", "")
             preset_domain = str(preset.get("domain", "")).strip()
             if preset_domain and preset_domain not in domain_favorites:
                 domain_favorites.append(preset_domain)
 
-        current_domain = str(config.get("domain", DEFAULT_DOMAIN)).strip() or DEFAULT_DOMAIN
-        if current_domain not in domain_favorites:
+        current_domain = str(config.get("domain", DEFAULT_DOMAIN)).strip()
+        if current_domain and current_domain not in domain_favorites:
             domain_favorites.append(current_domain)
 
         config["domain_favorites"] = domain_favorites

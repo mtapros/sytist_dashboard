@@ -1,3 +1,5 @@
+import logging
+
 try:
     import mysql.connector
     HAS_MYSQL = True
@@ -5,6 +7,8 @@ except ImportError:
     HAS_MYSQL = False
 
 from models import CartItem, Order, PhotoPath
+
+logger = logging.getLogger(__name__)
 
 
 class SytistDataLoader:
@@ -159,8 +163,8 @@ class SytistDataLoader:
                     "status_descr": self._clean(row[2] if not isinstance(row, dict) else row.get("status_descr")),
                     "status_show_order": self._clean(row[3] if not isinstance(row, dict) else row.get("status_show_order")),
                 }
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("Could not load order status lookup from DB: %s", exc)
         self.order_status_lookup = lookup
         return lookup
 
@@ -363,7 +367,8 @@ class SytistDataLoader:
                     }
                     if photo_paths:
                         break
-                except Exception:
+                except Exception as exc:
+                    logger.debug("Photo table query failed (%s): %s", query, exc)
                     continue
 
             return orders, cart_items, photo_paths, status_lookup
