@@ -68,6 +68,10 @@ class SytistDashboard:
         self.photo_paths: dict[str, PhotoPath] = {}
         self.order_status_lookup: dict[str, dict] = {}
 
+        self.setup_ui()
+        self.refresh_domain_ui()
+        self.apply_selected_preset_to_runtime()
+
     # ------------------------------------------------------------------
     # Keyring helpers — passwords are stored in the OS credential store
     # (via the optional `keyring` package) and never written to JSON.
@@ -89,9 +93,6 @@ class SytistDashboard:
                 keyring.set_password(_KEYRING_SERVICE, preset_name, password)
             except Exception as exc:
                 logger.warning("Could not save password to keyring: %s", exc)
-        self.setup_ui()
-        self.refresh_domain_ui()
-        self.apply_selected_preset_to_runtime()
 
     def save_config(self):
         self.config_store.save(self.config)
