@@ -78,6 +78,8 @@ class CartItem:
 class PhotoPath:
     folder: str
     hashed_file: str
+    web_file: str = ""
+    large_file: str = ""
 
 
 @dataclass
