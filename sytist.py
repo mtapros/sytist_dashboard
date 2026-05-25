@@ -544,7 +544,9 @@ class SytistDashboard:
                 url = ""
                 photo = self.photo_paths.get(str(item.pic_id))
                 if photo:
-                    url = f"{domain}/sy-photos/{photo.folder}/{photo.hashed_file}"
+                    candidates = self.export_service._photo_url_candidates(domain, photo)
+                    if candidates:
+                        url = candidates[0]
                 self.tree_items.insert("", tk.END, values=(item.product, item.qty, item.price, item.file, url))
 
     def get_order_by_id(self, order_id: str):
@@ -667,7 +669,9 @@ class SytistDashboard:
                 url = ""
                 photo = self.photo_paths.get(str(item.pic_id))
                 if photo:
-                    url = f"{domain}/sy-photos/{photo.folder}/{photo.hashed_file}"
+                    candidates = self.export_service._photo_url_candidates(domain, photo)
+                    if candidates:
+                        url = candidates[0]
                 items.append((item, url))
         return items
 
@@ -893,7 +897,7 @@ class SytistDashboard:
             ))
 
         def error_callback(task, exc):
-            logger.warning("Failed to download %s: %s", task.url, exc)
+            logger.warning("Failed to download %s: %s", task.urls[0] if task.urls else "(no-url)", exc)
 
         self.export_service.process_downloads(
             tasks=tasks,
@@ -917,7 +921,10 @@ class SytistDashboard:
                 photo = self.photo_paths.get(str(item.pic_id))
                 if not photo:
                     continue
-                url = f"{domain}/sy-photos/{photo.folder}/{photo.hashed_file}"
+                candidates = self.export_service._photo_url_candidates(domain, photo)
+                if not candidates:
+                    continue
+                url = candidates[0]
                 size_key = self.printing_service.detect_size_key_for_order_item(item)
                 qty = max(1, int(_safe_qty(item.qty)))
                 for _ in range(qty):

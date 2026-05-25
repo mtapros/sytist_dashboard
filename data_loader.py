@@ -284,6 +284,8 @@ class SytistDataLoader:
                                 photo_paths[pic_id] = PhotoPath(
                                     folder=self._clean(record.get("pic_folder", "")),
                                     hashed_file=self._clean(record.get("pic_full", "")),
+                                    web_file=self._clean(record.get("pic_pic", "")),
+                                    large_file=self._clean(record.get("pic_large", "")),
                                 )
 
                     elif active_table == 'ms_order_status':
@@ -373,8 +375,8 @@ class SytistDataLoader:
 
             photo_paths = {}
             photo_queries = [
-                "SELECT pic_id, pic_folder, pic_full FROM ms_photos",
-                "SELECT pic_id, pic_folder, pic_full FROM ms_pic",
+                "SELECT pic_id, pic_folder, pic_full, pic_pic, pic_large FROM ms_photos",
+                "SELECT pic_id, pic_folder, pic_full, pic_pic, pic_large FROM ms_pic",
             ]
             for query in photo_queries:
                 try:
@@ -383,6 +385,8 @@ class SytistDataLoader:
                         self._clean(r.get("pic_id")): PhotoPath(
                             folder=self._clean(r.get("pic_folder")),
                             hashed_file=self._clean(r.get("pic_full")),
+                            web_file=self._clean(r.get("pic_pic")),
+                            large_file=self._clean(r.get("pic_large")),
                         )
                         for r in cursor.fetchall()
                         if self._clean(r.get("pic_id"))

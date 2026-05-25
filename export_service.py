@@ -17,7 +17,7 @@ def _safe_qty(qty_str: str) -> float:
 
 @dataclass
 class DownloadTask:
-    url: str
+    urls: List[str]
     product_folder: str
     prefix: str
     name_base: str
@@ -28,6 +28,21 @@ class DownloadTask:
 class ExportService:
     def __init__(self, printing_service: PrintingService):
         self.printing_service = printing_service
+
+    @staticmethod
+    def _photo_url_candidates(domain: str, photo: PhotoPath) -> List[str]:
+        base = domain.rstrip("/")
+        filenames = [photo.hashed_file, photo.large_file, photo.web_file]
+        urls: List[str] = []
+        seen = set()
+        for filename in filenames:
+            if not filename:
+                continue
+            url = f"{base}/sy-photos/{photo.folder}/{filename}"
+            if url not in seen:
+                seen.add(url)
+                urls.append(url)
+        return urls
 
     def build_download_tasks(
         self,
@@ -43,7 +58,9 @@ class ExportService:
                 photo = photo_paths.get(str(item.pic_id))
                 if not photo:
                     continue
-                url = f"{domain}/sy-photos/{photo.folder}/{photo.hashed_file}"
+                urls = self._photo_url_candidates(domain, photo)
+                if not urls:
+                    continue
                 product_folder = self.printing_service.determine_folder(item.product)
                 raw_name = item.file or "photo.jpg"
                 name_base, ext = os.path.splitext(raw_name)
@@ -53,7 +70,7 @@ class ExportService:
                 clean_first = order.first.replace(" ", "").replace("?", "")
                 prefix = f"{order.id}_{clean_last}_{clean_first}"
                 tasks.append(DownloadTask(
-                    url=url,
+                    urls=urls,
                     product_folder=product_folder,
                     prefix=prefix,
                     name_base=name_base,
@@ -74,9 +91,18 @@ class ExportService:
             os.makedirs(prod_dir, exist_ok=True)
             temp_file = os.path.join(base_dir, "temp_dl" + task.ext)
             try:
-                req = urllib.request.Request(task.url, headers={"User-Agent": "Mozilla/5.0"})
-                with urllib.request.urlopen(req) as response, open(temp_file, "wb") as out_file:
-                    shutil.copyfileobj(response, out_file)
+                last_exc = None
+                for url in task.urls:
+                    try:
+                        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+                        with urllib.request.urlopen(req) as response, open(temp_file, "wb") as out_file:
+                            shutil.copyfileobj(response, out_file)
+                        last_exc = None
+                        break
+                    except Exception as exc:
+                        last_exc = exc
+                if last_exc is not None:
+                    raise last_exc
                 for q in range(1, task.qty + 1):
                     final_name = (
                         f"{task.prefix}_{task.name_base}{task.ext}"
