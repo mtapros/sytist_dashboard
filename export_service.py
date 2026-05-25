@@ -1,5 +1,6 @@
 import os
 import shutil
+import ssl
 import urllib.request
 from dataclasses import dataclass
 from typing import Callable, Dict, List
@@ -95,8 +96,15 @@ class ExportService:
                 for url in task.urls:
                     try:
                         req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-                        with urllib.request.urlopen(req) as response, open(temp_file, "wb") as out_file:
-                            shutil.copyfileobj(response, out_file)
+                        try:
+                            with urllib.request.urlopen(req, timeout=30) as response, open(temp_file, "wb") as out_file:
+                                shutil.copyfileobj(response, out_file)
+                        except ssl.SSLError:
+                            ctx = ssl.create_default_context()
+                            ctx.check_hostname = False
+                            ctx.verify_mode = ssl.CERT_NONE
+                            with urllib.request.urlopen(req, context=ctx, timeout=30) as response, open(temp_file, "wb") as out_file:
+                                shutil.copyfileobj(response, out_file)
                         last_exc = None
                         break
                     except Exception as exc:

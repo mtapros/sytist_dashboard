@@ -439,16 +439,25 @@ class SytistDashboard:
         threading.Thread(target=self._fetch_and_display_image, args=(url,), daemon=True).start()
 
     def _fetch_and_display_image(self, url):
+        import ssl
         try:
             req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-            with urllib.request.urlopen(req) as response:
-                raw_data = response.read()
+            try:
+                with urllib.request.urlopen(req, timeout=30) as response:
+                    raw_data = response.read()
+            except ssl.SSLError:
+                ctx = ssl.create_default_context()
+                ctx.check_hostname = False
+                ctx.verify_mode = ssl.CERT_NONE
+                with urllib.request.urlopen(req, context=ctx, timeout=30) as response:
+                    raw_data = response.read()
             image = Image.open(io.BytesIO(raw_data))
             image.thumbnail((450, 450), Image.Resampling.LANCZOS)
             photo = ImageTk.PhotoImage(image)
-            self.root.after(0, lambda: self._update_preview_label(photo))
+            self.root.after(0, lambda p=photo: self._update_preview_label(p))
         except Exception as e:
-            self.root.after(0, lambda: self.preview_label.config(text=f"Failed to load image.\n{e}", image=""))
+            err_msg = str(e)
+            self.root.after(0, lambda msg=err_msg: self.preview_label.config(text=f"Failed to load image.\n{msg}", image=""))
 
     def _update_preview_label(self, photo):
         self.preview_label.config(image=photo, text="")
@@ -896,8 +905,11 @@ class SytistDashboard:
                 progress_var.set(p),
             ))
 
+        failed: list = []
+
         def error_callback(task, exc):
             logger.warning("Failed to download %s: %s", task.urls[0] if task.urls else "(no-url)", exc)
+            failed.append((task, exc))
 
         self.export_service.process_downloads(
             tasks=tasks,
@@ -907,7 +919,12 @@ class SytistDashboard:
         )
 
         def _finish():
-            status_label.config(text="Done! You can import to Lightroom.")
+            if failed:
+                first_err = str(failed[0][1])
+                msg = f"Done with {len(failed)} error(s).\nFirst error: {first_err[:120]}"
+            else:
+                msg = "Done! You can import to Lightroom."
+            status_label.config(text=msg)
             ttk.Button(prog_win, text="Close", command=prog_win.destroy).pack(pady=10)
 
         self.root.after(0, _finish)

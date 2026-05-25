@@ -95,7 +95,7 @@ INSERT INTO `ms_photos` VALUES
 
         attempted = []
 
-        def fake_urlopen(request):
+        def fake_urlopen(request, **kwargs):
             attempted.append(request.full_url)
             if request.full_url.endswith("original_abc_IMG_1.jpg"):
                 raise HTTPError(request.full_url, 404, "Not Found", hdrs=None, fp=None)
