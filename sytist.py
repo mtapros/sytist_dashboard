@@ -498,7 +498,7 @@ class SytistDashboard:
         self.populate_orders()
 
     def load_sql_file(self):
-        filepath = filedialog.askopenfilename(filetypes=[("SQL Files", "*.sql")])
+        filepath = filedialog.askopenfilename(filetypes=[("SQL/Zip Files", "*.sql *.zip"), ("SQL Files", "*.sql"), ("Zip Files", "*.zip")])
         if not filepath:
             return
         try:

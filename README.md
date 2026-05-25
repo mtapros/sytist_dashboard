@@ -86,7 +86,8 @@ schema that this app mirrors).
 
 ## SQL dump loading
 
-Use **Load Offline .sql File** to load a `mysqldump` export.  The parser
+Use **Load Offline .sql File** to load a `mysqldump` export from either a
+plain `.sql` file or a `.zip` archive that contains a SQL dump.  The parser
 handles standard mysqldump output with `CREATE TABLE` + `INSERT INTO` blocks.
 It tracks quote and escape state, so values containing commas, single quotes,
 or newlines are parsed correctly.
