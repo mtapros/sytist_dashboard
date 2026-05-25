@@ -1,4 +1,8 @@
 import logging
+import os
+from contextlib import contextmanager
+from io import TextIOWrapper
+from zipfile import ZipFile
 
 try:
     import mysql.connector
@@ -86,6 +90,24 @@ class SytistDataLoader:
             return None
         rest = line[len(marker):]
         return rest.split('`', 1)[0]
+
+    @contextmanager
+    def _open_sql_stream(self, filepath):
+        if os.path.splitext(filepath)[1].lower() != ".zip":
+            with open(filepath, 'r', encoding='utf-8', errors='ignore') as stream:
+                yield stream
+            return
+
+        with ZipFile(filepath) as archive:
+            sql_members = [
+                info for info in archive.infolist()
+                if not info.is_dir() and info.filename.lower().endswith(".sql")
+            ]
+            if not sql_members:
+                raise ValueError("Zip archive does not contain a .sql file.")
+            with archive.open(sql_members[0]) as raw_stream:
+                with TextIOWrapper(raw_stream, encoding='utf-8', errors='ignore') as stream:
+                    yield stream
 
     def _build_order(self, record, status_lookup):
         status_id = self._clean(record.get("order_status", ""))
@@ -182,7 +204,7 @@ class SytistDataLoader:
         create_buffer = None
         create_table_name = None
 
-        with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
+        with self._open_sql_stream(filepath) as f:
             for line in f:
                 if create_buffer is not None:
                     create_buffer.append(line)
