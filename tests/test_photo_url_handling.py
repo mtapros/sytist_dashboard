@@ -119,5 +119,60 @@ INSERT INTO `ms_photos` VALUES
         )
 
 
+    def test_sql_loader_includes_cart_archive_items(self):
+        """Products stored in ms_cart_archive must appear alongside ms_cart items."""
+        sql = """
+CREATE TABLE `ms_orders` (
+  `order_id` int(11) NOT NULL,
+  `order_first_name` varchar(255) NOT NULL,
+  `order_last_name` varchar(255) NOT NULL,
+  `order_email` varchar(255) NOT NULL,
+  `order_total` varchar(20) NOT NULL,
+  `order_status` int(11) NOT NULL
+) ENGINE=MyISAM DEFAULT CHARSET=utf8mb3;
+INSERT INTO `ms_orders` VALUES
+(1,'Alice','Smith','alice@example.com','10.00',1),
+(2,'Bob','Jones','bob@example.com','20.00',1);
+
+CREATE TABLE `ms_cart` (
+  `cart_order` int(11) NOT NULL,
+  `cart_product_name` varchar(255) NOT NULL,
+  `cart_qty` varchar(20) NOT NULL,
+  `cart_price` varchar(20) NOT NULL,
+  `cart_pic_org` varchar(255) NOT NULL,
+  `cart_pic_id` int(11) NOT NULL
+) ENGINE=MyISAM DEFAULT CHARSET=utf8mb3;
+INSERT INTO `ms_cart` VALUES
+(1,'4x6 Print','1','1.00','IMG_1.jpg',101);
+
+CREATE TABLE `ms_cart_archive` (
+  `cart_order` int(11) NOT NULL,
+  `cart_product_name` varchar(255) NOT NULL,
+  `cart_qty` varchar(20) NOT NULL,
+  `cart_price` varchar(20) NOT NULL,
+  `cart_pic_org` varchar(255) NOT NULL,
+  `cart_pic_id` int(11) NOT NULL
+) ENGINE=MyISAM DEFAULT CHARSET=utf8mb3;
+INSERT INTO `ms_cart_archive` VALUES
+(2,'8x10 Print','2','5.00','IMG_2.jpg',102);
+"""
+        with tempfile.NamedTemporaryFile("w", suffix=".sql", delete=False, encoding="utf-8") as tmp:
+            tmp.write(sql)
+            sql_path = tmp.name
+        self.addCleanup(lambda: os.path.exists(sql_path) and os.remove(sql_path))
+
+        loader = SytistDataLoader()
+        _, cart_items, _, _ = loader.load_sql_dump(sql_path)
+
+        order1_items = [ci for ci in cart_items if ci.order_id == "1"]
+        order2_items = [ci for ci in cart_items if ci.order_id == "2"]
+
+        self.assertEqual(len(order1_items), 1, "Order 1 should have one item from ms_cart")
+        self.assertEqual(order1_items[0].product, "4x6 Print")
+
+        self.assertEqual(len(order2_items), 1, "Order 2 should have one item from ms_cart_archive")
+        self.assertEqual(order2_items[0].product, "8x10 Print")
+
+
 if __name__ == "__main__":
     unittest.main()

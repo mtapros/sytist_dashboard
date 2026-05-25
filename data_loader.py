@@ -231,6 +231,9 @@ class SytistDataLoader:
                     elif line.startswith('INSERT INTO `ms_cart`'):
                         active_table = 'ms_cart'
                         buffer = line[line.find(" VALUES ") + 8:]
+                    elif line.startswith('INSERT INTO `ms_cart_archive`'):
+                        active_table = 'ms_cart_archive'
+                        buffer = line[line.find(" VALUES ") + 8:]
                     elif line.startswith('INSERT INTO `ms_photos`') or line.startswith('INSERT INTO `ms_pic`'):
                         active_table = 'ms_photos'
                         buffer = line[line.find(" VALUES ") + 8:]
@@ -264,7 +267,7 @@ class SytistDataLoader:
                             if record:
                                 orders.append(self._build_order(record, status_lookup))
 
-                    elif active_table == 'ms_cart':
+                    elif active_table in ('ms_cart', 'ms_cart_archive'):
                         for parts in parsed_tuples:
                             record = {cols[i]: self._clean(parts[i]) for i in range(min(len(cols), len(parts)))}
                             cart_items.append(CartItem(
@@ -372,6 +375,28 @@ class SytistDataLoader:
                 )
                 for r in cursor.fetchall()
             ]
+
+            for archive_query in [
+                """
+                SELECT cart_order, cart_product_name, cart_qty, cart_price, cart_pic_org, cart_pic_id
+                FROM ms_cart_archive
+                """
+            ]:
+                try:
+                    cursor.execute(archive_query)
+                    cart_items.extend(
+                        CartItem(
+                            order_id=self._clean(r.get("cart_order")),
+                            product=self._clean(r.get("cart_product_name")),
+                            qty=self._clean(r.get("cart_qty")),
+                            price=self._clean(r.get("cart_price")),
+                            file=self._clean(r.get("cart_pic_org")),
+                            pic_id=self._clean(r.get("cart_pic_id")),
+                        )
+                        for r in cursor.fetchall()
+                    )
+                except Exception as exc:
+                    logger.debug("ms_cart_archive query failed: %s", exc)
 
             photo_paths = {}
             photo_queries = [
