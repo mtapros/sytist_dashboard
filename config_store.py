@@ -122,3 +122,20 @@ class ConfigStore:
         selected_preset = config["db_presets"][selected]
         selected_preset["domain"] = str(selected_preset.get("domain") or current_domain).strip() or current_domain
         config["domain"] = selected_preset["domain"]
+
+
+    def _normalize_preset(self, preset):
+        preset = dict(preset or {})
+        preset.setdefault("domain", "")
+        preset.setdefault("host", "")
+        preset.setdefault("db_name", "")
+        preset.setdefault("db_user", "")
+        preset.setdefault("db_pass", "")
+        preset.setdefault("zoho_accounts_domain", "https://accounts.zoho.com")
+        preset.setdefault("zoho_api_domain", "https://www.zohoapis.com")
+        preset.setdefault("zoho_client_id", "")
+        preset.setdefault("zoho_client_secret", "")
+        preset.setdefault("zoho_refresh_token", "")
+        preset.setdefault("zoho_organization_id", "")
+        preset.setdefault("zoho_prefix", "")
+        return preset

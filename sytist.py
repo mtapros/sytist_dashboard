@@ -2,6 +2,7 @@ import io
 import logging
 import os
 import threading
+from datetime import datetime
 import tkinter as tk
 import urllib.parse
 import urllib.request
@@ -16,6 +17,7 @@ from dialogs import Dialogs
 from export_service import ExportService, _safe_qty
 from models import CartItem, Order, PhotoPath, PrintJob
 from printing_service import HAS_PIL, HAS_WIN32, PrintingService
+from zoho_books import ZohoBooksClient, ZohoBooksError
 
 try:
     from PIL import Image, ImageTk
@@ -167,6 +169,13 @@ class SytistDashboard:
                         "db_name": "",
                         "db_user": "",
                         "db_pass": "",
+                        "zoho_accounts_domain": "https://accounts.zoho.com",
+                        "zoho_api_domain": "https://www.zohoapis.com",
+                        "zoho_client_id": "",
+                        "zoho_client_secret": "",
+                        "zoho_refresh_token": "",
+                        "zoho_organization_id": "",
+                        "zoho_prefix": "",
                     }
                     self.config["selected_preset"] = preset_name
         self.refresh_domain_ui()
@@ -198,6 +207,13 @@ class SytistDashboard:
             "db_name": current_preset.get("db_name", "") if current_preset else "",
             "db_user": current_preset.get("db_user", "") if current_preset else "",
             "db_pass": current_preset.get("db_pass", "") if current_preset else "",
+            "zoho_accounts_domain": current_preset.get("zoho_accounts_domain", "https://accounts.zoho.com") if current_preset else "https://accounts.zoho.com",
+            "zoho_api_domain": current_preset.get("zoho_api_domain", "https://www.zohoapis.com") if current_preset else "https://www.zohoapis.com",
+            "zoho_client_id": current_preset.get("zoho_client_id", "") if current_preset else "",
+            "zoho_client_secret": current_preset.get("zoho_client_secret", "") if current_preset else "",
+            "zoho_refresh_token": current_preset.get("zoho_refresh_token", "") if current_preset else "",
+            "zoho_organization_id": current_preset.get("zoho_organization_id", "") if current_preset else "",
+            "zoho_prefix": current_preset.get("zoho_prefix", "") if current_preset else "",
         }
         self.config["selected_preset"] = preset_name
         self.config["domain"] = domain
@@ -283,6 +299,10 @@ class SytistDashboard:
         ttk.Button(row1, text="Print Image Files", command=self.print_image_files).pack(side=tk.LEFT, padx=5)
 
         ttk.Separator(row1, orient=tk.VERTICAL).pack(side=tk.LEFT, padx=15, fill=tk.Y)
+        ttk.Button(row1, text="Zoho Setup", command=self.configure_zoho).pack(side=tk.LEFT, padx=5)
+        ttk.Button(row1, text="Push Selected to Zoho", command=self.push_selected_to_zoho).pack(side=tk.LEFT, padx=5)
+
+        ttk.Separator(row1, orient=tk.VERTICAL).pack(side=tk.LEFT, padx=15, fill=tk.Y)
         ttk.Label(row1, text="Website / Favorite:").pack(side=tk.LEFT, padx=(5, 5))
         self.domain_var = tk.StringVar(value=self.config["domain"])
         self.domain_combo = ttk.Combobox(row1, textvariable=self.domain_var, width=35)
@@ -296,6 +316,9 @@ class SytistDashboard:
         self.search_var = tk.StringVar()
         self.search_var.trace_add("write", self.filter_orders)
         ttk.Entry(row2, textvariable=self.search_var, width=30).pack(side=tk.LEFT, padx=5)
+        ttk.Separator(row2, orient=tk.VERTICAL).pack(side=tk.LEFT, padx=15, fill=tk.Y)
+        ttk.Button(row2, text="Mark Selected Reviewed", command=self.mark_selected_reviewed).pack(side=tk.LEFT, padx=5)
+        ttk.Button(row2, text="Mark Selected Unreviewed", command=self.mark_selected_unreviewed).pack(side=tk.LEFT, padx=5)
 
         main_paned = ttk.PanedWindow(self.root, orient=tk.HORIZONTAL)
         main_paned.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
@@ -338,6 +361,8 @@ class SytistDashboard:
         self.tree_orders.configure(yscrollcommand=order_scroll_y.set)
         self.tree_orders.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         order_scroll_y.pack(side=tk.RIGHT, fill=tk.Y)
+        self.tree_orders.tag_configure("reviewed", foreground="#1f7a1f")
+        self.tree_orders.tag_configure("unreviewed", foreground="#b22222")
         self.tree_orders.bind("<Button-1>", self.on_order_click)
         self.tree_orders.bind("<<TreeviewSelect>>", self.on_order_select)
         self.tree_orders.bind("<Double-1>", self.on_order_double_click)
@@ -523,6 +548,9 @@ class SytistDashboard:
             checkbox = "[X]" if order.selected else "[ ]"
             rec = self.reconcile_order(order)
             issue_count = len(rec["issues"])
+            state = self.get_order_state(order.id)
+            reviewed = bool(state.get("reviewed", False))
+            tags = ("reviewed",) if reviewed else ("unreviewed",)
             self.tree_orders.insert(
                 "",
                 tk.END,
@@ -536,6 +564,7 @@ class SytistDashboard:
                     rec["dashboard_status"],
                     issue_count,
                 ),
+                tags=tags,
             )
 
     def on_order_select(self, event):
@@ -557,6 +586,31 @@ class SytistDashboard:
                     if candidates:
                         url = candidates[0]
                 self.tree_items.insert("", tk.END, values=(item.product, item.qty, item.price, item.file, url))
+
+    def get_selected_order_ids(self):
+        selected_ids = []
+        for order in self.orders:
+            if order.selected:
+                selected_ids.append(str(order.id))
+        return selected_ids
+
+    def set_reviewed_for_selected_orders(self, reviewed: bool):
+        selected_ids = self.get_selected_order_ids()
+        if not selected_ids:
+            messagebox.showinfo("No Orders Selected", "Use the checkbox column to select one or more orders first.")
+            return
+        for order_id in selected_ids:
+            self.update_order_state(order_id, reviewed=reviewed)
+        self.populate_orders()
+        current = self.tree_orders.selection()
+        if current:
+            self.on_order_select(None)
+
+    def mark_selected_reviewed(self):
+        self.set_reviewed_for_selected_orders(True)
+
+    def mark_selected_unreviewed(self):
+        self.set_reviewed_for_selected_orders(False)
 
     def get_order_by_id(self, order_id: str):
         for order in self.orders:
@@ -1080,6 +1134,172 @@ class SytistDashboard:
             ttk.Button(prog_win, text="Close", command=prog_win.destroy).pack(pady=10)
 
         self.root.after(0, _finish)
+
+    def get_selected_orders(self):
+        return [order for order in self.orders if getattr(order, "selected", False)]
+
+    def configure_zoho(self):
+        preset_name = self.get_selected_preset_name() or "Default"
+        preset = self.get_selected_preset()
+        if not preset:
+            messagebox.showerror("No Preset", "Select or save a preset/domain first.")
+            return
+
+        top = tk.Toplevel(self.root)
+        top.title(f"Zoho Setup - {preset_name}")
+        top.geometry("520x420")
+        top.transient(self.root)
+        top.grab_set()
+
+        fields = [
+            ("Accounts Domain", "zoho_accounts_domain", "https://accounts.zoho.com"),
+            ("API Domain", "zoho_api_domain", "https://www.zohoapis.com"),
+            ("Client ID", "zoho_client_id", ""),
+            ("Client Secret", "zoho_client_secret", ""),
+            ("Refresh Token", "zoho_refresh_token", ""),
+            ("Organization ID", "zoho_organization_id", ""),
+            ("Invoice Prefix", "zoho_prefix", ""),
+        ]
+        vars_map = {}
+        frame = ttk.Frame(top, padding=12)
+        frame.pack(fill=tk.BOTH, expand=True)
+        ttk.Label(frame, text="Minimal Zoho Books invoice setup for the selected Sytist preset.").grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 10))
+        for idx, (label, key, default) in enumerate(fields, start=1):
+            ttk.Label(frame, text=label + ":").grid(row=idx, column=0, sticky="w", padx=(0, 10), pady=6)
+            var = tk.StringVar(value=str(preset.get(key, default) or default))
+            vars_map[key] = var
+            ttk.Entry(frame, textvariable=var, width=48).grid(row=idx, column=1, sticky="ew", pady=6)
+        frame.columnconfigure(1, weight=1)
+
+        def save():
+            for _, key, _ in fields:
+                preset[key] = vars_map[key].get().strip()
+            self.save_config()
+            top.destroy()
+            messagebox.showinfo("Saved", f"Zoho settings saved for preset {preset_name}.")
+
+        btns = ttk.Frame(frame)
+        btns.grid(row=len(fields)+1, column=0, columnspan=2, sticky="e", pady=(14, 0))
+        ttk.Button(btns, text="Save", command=save).pack(side=tk.LEFT, padx=6)
+        ttk.Button(btns, text="Cancel", command=top.destroy).pack(side=tk.LEFT, padx=6)
+
+    def get_zoho_client(self):
+        preset = self.get_selected_preset() or {}
+        required = {
+            "zoho_accounts_domain": preset.get("zoho_accounts_domain", "").strip(),
+            "zoho_api_domain": preset.get("zoho_api_domain", "").strip(),
+            "zoho_client_id": preset.get("zoho_client_id", "").strip(),
+            "zoho_client_secret": preset.get("zoho_client_secret", "").strip(),
+            "zoho_refresh_token": preset.get("zoho_refresh_token", "").strip(),
+            "zoho_organization_id": str(preset.get("zoho_organization_id", "")).strip(),
+            "zoho_prefix": preset.get("zoho_prefix", "").strip(),
+        }
+        missing = [k for k, v in required.items() if not v]
+        if missing:
+            raise ZohoBooksError("Missing Zoho settings for selected preset: " + ", ".join(missing))
+        return ZohoBooksClient(
+            accounts_domain=required["zoho_accounts_domain"],
+            client_id=required["zoho_client_id"],
+            client_secret=required["zoho_client_secret"],
+            refresh_token=required["zoho_refresh_token"],
+            organization_id=required["zoho_organization_id"],
+            api_domain=required["zoho_api_domain"],
+        ), required["zoho_prefix"]
+
+    def _order_items_for_order(self, order_id):
+        return [item for item in self.cart_items if item.order_id == order_id and item.product]
+
+    def _sanitize_zoho_text(self, value):
+        text = str(value or "")
+        return text.replace("<", "(").replace(">", ")").strip()
+
+    def _build_zoho_invoice_payload(self, order, contact_id, invoice_number):
+        items = self._order_items_for_order(order.id)
+        line_items = []
+        for item in items:
+            qty = _safe_qty(item.qty) or 1
+            try:
+                rate = float(str(item.price or "0").replace("$", "").strip() or 0)
+            except Exception:
+                rate = 0.0
+            name_parts = [self._sanitize_zoho_text(item.product or "")]
+            if getattr(item, "file", ""):
+                name_parts.append(self._sanitize_zoho_text(f"File: {item.file}"))
+            description = " | ".join(part for part in name_parts if part)
+            line_items.append({
+                "name": self._sanitize_zoho_text(item.product or "Photo Order") or "Photo Order",
+                "description": self._sanitize_zoho_text(description)[:2000],
+                "quantity": qty,
+                "rate": rate,
+            })
+
+        if not line_items:
+            total_rate = float(str(order.total or "0").replace("$", "").strip() or 0)
+            line_items.append({
+                "name": self._sanitize_zoho_text(f"Sytist Order {order.id}"),
+                "description": self._sanitize_zoho_text(f"Sytist order {order.id}"),
+                "quantity": 1,
+                "rate": total_rate,
+            })
+
+        return {
+            "customer_id": contact_id,
+            "invoice_number": self._sanitize_zoho_text(invoice_number),
+            "reference_number": self._sanitize_zoho_text(str(order.id)),
+            "date": (order.date or "")[:10],
+            "notes": self._sanitize_zoho_text(f"Sytist order {order.id}"),
+            "line_items": line_items,
+        }
+
+    def push_selected_to_zoho(self):
+        selected = self.get_selected_orders()
+        if not selected:
+            messagebox.showinfo("No Orders Selected", "Select one or more orders with the checkbox first.")
+            return
+        try:
+            client, prefix = self.get_zoho_client()
+        except ZohoBooksError as exc:
+            messagebox.showerror("Zoho Setup Incomplete", str(exc))
+            return
+
+        results = []
+        for order in selected:
+            try:
+                invoice_number = client.build_invoice_number(prefix, order.id)
+                existing = client.get_invoice_by_number(invoice_number)
+                if existing:
+                    self.update_order_state(
+                        order.id,
+                        zoho_invoice_id=str(existing.get("invoice_id", "")),
+                        zoho_invoice_number=str(existing.get("invoice_number", invoice_number)),
+                        zoho_last_push_at=datetime.now().isoformat(timespec="seconds"),
+                        zoho_last_error="",
+                    )
+                    results.append(f"Order {order.id}: already exists as {existing.get('invoice_number', invoice_number)}")
+                    continue
+
+                contact = client.find_or_create_contact(order)
+                contact_id = contact.get("contact_id")
+                if not contact_id:
+                    raise ZohoBooksError("Zoho contact create/lookup did not return contact_id.")
+
+                payload = self._build_zoho_invoice_payload(order, contact_id, invoice_number)
+                created = client.create_invoice(payload)
+                invoice = created.get("invoice") or {}
+                self.update_order_state(
+                    order.id,
+                    zoho_invoice_id=str(invoice.get("invoice_id", "")),
+                    zoho_invoice_number=str(invoice.get("invoice_number", invoice_number)),
+                    zoho_last_push_at=datetime.now().isoformat(timespec="seconds"),
+                    zoho_last_error="",
+                )
+                results.append(f"Order {order.id}: created {invoice.get('invoice_number', invoice_number)}")
+            except Exception as exc:
+                self.update_order_state(order.id, zoho_last_error=str(exc))
+                results.append(f"Order {order.id}: ERROR {exc}")
+
+        self.populate_orders()
+        messagebox.showinfo("Zoho Push Results", "\n".join(results[:25]))
 
 
 if __name__ == "__main__":

@@ -1,0 +1,32 @@
+{
+    "domain": "http://www.eagleactionpics.com",
+    "domain_favorites": [
+        "www.eagleactionpics.com",
+        "http://www.eagleactionpics.com"
+    ],
+    "selected_preset": "eagleactionpics.com",
+    "db_presets": {
+        "Default": {
+            "domain": "",
+            "host": "",
+            "db_name": "",
+            "db_user": ""
+        },
+        "eagleactionpics.com": {
+            "domain": "http://www.eagleactionpics.com",
+            "host": "158.106.136.107",
+            "db_name": "hanleyac_sytist",
+            "db_user": "hanleyac_offline"
+        }
+    },
+    "printer_routes": {
+        "4x6": "",
+        "5x7": "",
+        "8x10": "",
+        "wallet": "",
+        "button": "",
+        "magnet": "",
+        "7in": "",
+        "10in": ""
+    }
+}
