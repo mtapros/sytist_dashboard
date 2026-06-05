@@ -17,7 +17,7 @@ class Dialogs:
     ) -> None:
         top = tk.Toplevel(self.root)
         top.title("Printer Routing")
-        top.geometry("760x390")
+        top.geometry("760x430")
         top.transient(self.root)
         top.grab_set()
 
@@ -33,6 +33,7 @@ class Dialogs:
         route_vars: Dict[str, tk.StringVar] = {}
         route_keys = [
             ("4x6", "4x6"),
+            ("4x5", "4x5"),
             ("5x7", "5x7"),
             ("8x10", "8x10"),
             ("wallet", "Wallet"),
@@ -61,7 +62,7 @@ class Dialogs:
     def ask_image_print_type(self) -> Optional[str]:
         top = tk.Toplevel(self.root)
         top.title("Choose Print Type")
-        top.geometry("430x230")
+        top.geometry("430x250")
         top.transient(self.root)
         top.grab_set()
 
@@ -71,6 +72,7 @@ class Dialogs:
         options = [
             ("Auto-detect from filename", "AUTO"),
             ("4x6", "4x6"),
+            ("4x5", "4x5"),
             ("5x7", "5x7"),
             ("8x10", "8x10"),
             ("Wallets (2x2 on 5x7)", "wallet"),
