@@ -45,6 +45,7 @@ class DashboardStateStore:
             "notes": "",
             "reviewed": False,
             "flagged": False,
+            "usps_shipment": {},
             "updated_at": "",
             "last_seen_sytist_status_id": "",
             "last_seen_sytist_status_name": "",

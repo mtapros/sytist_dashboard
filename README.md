@@ -53,6 +53,7 @@ python sytist.py
 | `dashboard_state.py` | Per-order workflow state stored in `dashboard_state.json` |
 | `export_service.py` | Download photos and organise them into print-size folders |
 | `printing_service.py` | Win32/Pillow direct-print execution |
+| `usps_service.py` | USPS OAuth/API service wrapper (address/rates/labels/tracking) |
 | `dialogs.py` | Reusable Tkinter dialog windows |
 
 ---
@@ -68,6 +69,38 @@ stores:
   **never** written to the JSON file)
 - **Printer routes** — maps print sizes (`4x6`, `5x7`, `8x10`, …) to Windows
   printer queue names
+- **USPS settings** — OAuth client credentials, API base/token URLs, timeout,
+  and a default ship-from/return address used by label requests
+
+### USPS shipping (MVP)
+
+The app includes an initial USPS workflow:
+
+- **USPS Setup** button to configure USPS cloud API settings
+- **USPS Ship Selected** button to open shipping actions for one selected order
+- Destination prefill from Sytist order shipping fields
+- API actions scaffolded for:
+  - address validation
+  - domestic rates
+  - label creation
+  - tracking lookup
+- Shipment metadata is saved in `dashboard_state.json` per order
+
+Required USPS setup:
+
+1. Create an app in the USPS developer portal.
+2. Enable the APIs your account is approved for.
+3. Enter OAuth client ID/client secret in **USPS Setup**.
+4. Confirm API base/token URLs for your USPS environment (production/sandbox).
+
+MVP limitations:
+
+- USPS cloud API products can be quota/approval-gated; unavailable products
+  will return API errors and are surfaced in the UI.
+- Endpoint payloads may require account-specific fields; this MVP is a safe
+  integration scaffold with clear error handling, not a guaranteed full
+  purchase flow for every USPS account out of the box.
+- Credentials are stored in your local config file; do not commit secrets.
 
 ### Expected Sytist database tables
 

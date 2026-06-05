@@ -1,7 +1,9 @@
 import io
+import json
 import logging
 import os
 import threading
+from dataclasses import asdict
 from datetime import datetime
 import tkinter as tk
 import urllib.parse
@@ -15,8 +17,9 @@ from dashboard_state import DashboardStateStore
 from data_loader import HAS_MYSQL, SytistDataLoader
 from dialogs import Dialogs
 from export_service import ExportService, _safe_qty
-from models import CartItem, Order, PhotoPath, PrintJob
+from models import CartItem, Order, PackageDetails, PhotoPath, PrintJob, ShippingAddress
 from printing_service import HAS_PIL, HAS_WIN32, PrintingService
+from usps_service import USPSNotConfiguredError, USPSService, USPSServiceError
 from zoho_books import ZohoBooksClient, ZohoBooksError
 
 try:
@@ -61,6 +64,7 @@ class SytistDashboard:
         self.dashboard_state = self.state_store.load()
         self.data_loader = SytistDataLoader()
         self.printing_service = PrintingService(self.config)
+        self.usps_service = USPSService(self.config)
         self.export_service = ExportService(self.printing_service)
         self.dialogs = Dialogs(self.root)
 
@@ -116,6 +120,7 @@ class SytistDashboard:
             self.config["domain"] = domain
             self.domain_var.set(domain)
         self.printing_service.config = self.config
+        self.usps_service.config = self.config
 
     def ensure_domain_in_favorites(self, domain: str):
         domain = domain.strip()
@@ -297,6 +302,10 @@ class SytistDashboard:
         ttk.Button(row1, text="Printer Routing", command=self.configure_printer_routing).pack(side=tk.LEFT, padx=5)
         ttk.Button(row1, text="Print Selected Orders", command=self.print_selected_orders).pack(side=tk.LEFT, padx=5)
         ttk.Button(row1, text="Print Image Files", command=self.print_image_files).pack(side=tk.LEFT, padx=5)
+
+        ttk.Separator(row1, orient=tk.VERTICAL).pack(side=tk.LEFT, padx=15, fill=tk.Y)
+        ttk.Button(row1, text="USPS Setup", command=self.configure_usps).pack(side=tk.LEFT, padx=5)
+        ttk.Button(row1, text="USPS Ship Selected", command=self.open_usps_shipping_dialog).pack(side=tk.LEFT, padx=5)
 
         ttk.Separator(row1, orient=tk.VERTICAL).pack(side=tk.LEFT, padx=15, fill=tk.Y)
         ttk.Button(row1, text="Zoho Setup", command=self.configure_zoho).pack(side=tk.LEFT, padx=5)
@@ -1137,6 +1146,322 @@ class SytistDashboard:
 
     def get_selected_orders(self):
         return [order for order in self.orders if getattr(order, "selected", False)]
+
+    def get_shipping_target_order(self):
+        selected_rows = self.tree_orders.selection()
+        if selected_rows:
+            order_id = str(self.tree_orders.item(selected_rows[0])["values"][1])
+            order = self.get_order_by_id(order_id)
+            if order:
+                return order
+
+        selected_orders = self.get_selected_orders()
+        if len(selected_orders) == 1:
+            return selected_orders[0]
+        if len(selected_orders) > 1:
+            messagebox.showinfo("Select One Order", "USPS shipping currently supports one order at a time.")
+            return None
+        messagebox.showwarning("No Order Selected", "Select an order in the table, or check one order first.")
+        return None
+
+    @staticmethod
+    def build_order_shipping_address(order: Order):
+        ship_first = (order.ship_first_name or "").strip()
+        ship_last = (order.ship_last_name or "").strip()
+        full_name = f"{ship_first} {ship_last}".strip() or order.name
+        return ShippingAddress(
+            full_name=full_name,
+            address_1=(order.ship_address or order.address or "").strip(),
+            address_2=(order.ship_address_2 or order.address_2 or "").strip(),
+            city=(order.ship_city or order.city or "").strip(),
+            state=(order.ship_state or order.state or "").strip(),
+            postal_code=(order.ship_zip or order.zip_code or "").strip(),
+            country=(order.ship_country or order.country or "US").strip() or "US",
+            phone=(order.phone or "").strip(),
+            email=(order.email or "").strip(),
+        )
+
+    def configure_usps(self):
+        usps = self.config.setdefault("usps", {})
+        ship_from = usps.setdefault("ship_from", {})
+
+        top = tk.Toplevel(self.root)
+        top.title("USPS Setup")
+        top.geometry("660x600")
+        top.transient(self.root)
+        top.grab_set()
+
+        frame = ttk.Frame(top, padding=12)
+        frame.pack(fill=tk.BOTH, expand=True)
+
+        enabled_var = tk.BooleanVar(value=bool(usps.get("enabled", False)))
+        ttk.Checkbutton(frame, text="Enable USPS integration", variable=enabled_var).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 8))
+        ttk.Label(
+            frame,
+            text="USPS cloud APIs require OAuth client credentials from developer.usps.com.\n"
+                 "Secrets are stored in your local config file; do not commit them.",
+            foreground="#666666",
+        ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(0, 12))
+
+        fields = [
+            ("Environment", "environment", "production"),
+            ("Base URL", "base_url", "https://api.usps.com"),
+            ("Token URL (optional)", "token_url", ""),
+            ("OAuth Client ID", "client_id", ""),
+            ("OAuth Client Secret", "client_secret", ""),
+            ("Timeout (seconds)", "timeout_seconds", "20"),
+        ]
+        vars_map = {}
+        for idx, (label, key, default) in enumerate(fields, start=2):
+            ttk.Label(frame, text=f"{label}:").grid(row=idx, column=0, sticky="w", padx=(0, 10), pady=4)
+            var = tk.StringVar(value=str(usps.get(key, default) or default))
+            vars_map[key] = var
+            ttk.Entry(frame, textvariable=var, width=56).grid(row=idx, column=1, sticky="ew", pady=4)
+
+        start_row = 2 + len(fields)
+        ttk.Separator(frame, orient=tk.HORIZONTAL).grid(row=start_row, column=0, columnspan=2, sticky="ew", pady=(12, 8))
+        ttk.Label(frame, text="Default Ship-From / Return Address").grid(row=start_row + 1, column=0, columnspan=2, sticky="w")
+
+        ship_from_fields = [
+            ("Name", "full_name"),
+            ("Address 1", "address_1"),
+            ("Address 2", "address_2"),
+            ("City", "city"),
+            ("State", "state"),
+            ("ZIP", "postal_code"),
+            ("Country", "country"),
+            ("Phone", "phone"),
+            ("Email", "email"),
+        ]
+        ship_from_vars = {}
+        for idx, (label, key) in enumerate(ship_from_fields, start=start_row + 2):
+            ttk.Label(frame, text=f"{label}:").grid(row=idx, column=0, sticky="w", padx=(0, 10), pady=3)
+            var = tk.StringVar(value=str(ship_from.get(key, "") or ("US" if key == "country" else "")))
+            ship_from_vars[key] = var
+            ttk.Entry(frame, textvariable=var, width=56).grid(row=idx, column=1, sticky="ew", pady=3)
+
+        frame.columnconfigure(1, weight=1)
+
+        def save():
+            usps["enabled"] = bool(enabled_var.get())
+            for _, key, _ in fields:
+                value = vars_map[key].get().strip()
+                if key == "timeout_seconds":
+                    try:
+                        usps[key] = max(1, int(value or "20"))
+                    except ValueError:
+                        usps[key] = 20
+                else:
+                    usps[key] = value
+            usps["ship_from"] = {key: var.get().strip() for key, var in ship_from_vars.items()}
+            self.save_config()
+            top.destroy()
+            messagebox.showinfo("Saved", "USPS settings saved.")
+
+        btns = ttk.Frame(frame)
+        btns.grid(row=start_row + 2 + len(ship_from_fields), column=0, columnspan=2, sticky="e", pady=(12, 0))
+        ttk.Button(btns, text="Save", command=save).pack(side=tk.LEFT, padx=6)
+        ttk.Button(btns, text="Cancel", command=top.destroy).pack(side=tk.LEFT, padx=6)
+
+    def open_usps_shipping_dialog(self):
+        order = self.get_shipping_target_order()
+        if not order:
+            return
+
+        state = self.get_order_state(order.id)
+        shipment = state.get("usps_shipment", {}) if isinstance(state.get("usps_shipment", {}), dict) else {}
+        default_dest = self.build_order_shipping_address(order)
+        saved_dest = shipment.get("destination", {}) if isinstance(shipment.get("destination", {}), dict) else {}
+        saved_package = shipment.get("package", {}) if isinstance(shipment.get("package", {}), dict) else {}
+        selected_rate_holder = {"value": shipment.get("selected_rate") if isinstance(shipment.get("selected_rate"), dict) else {}}
+
+        top = tk.Toplevel(self.root)
+        top.title(f"USPS Shipping - Order {order.id}")
+        top.geometry("760x720")
+        top.transient(self.root)
+        top.grab_set()
+
+        frame = ttk.Frame(top, padding=12)
+        frame.pack(fill=tk.BOTH, expand=True)
+
+        ttk.Label(frame, text=f"Order {order.id} - {(order.name or '').strip()}").grid(row=0, column=0, columnspan=4, sticky="w", pady=(0, 8))
+
+        def _initial_value(key: str, fallback: str = ""):
+            if key in saved_dest and str(saved_dest.get(key, "")).strip():
+                return str(saved_dest.get(key, "")).strip()
+            return str(getattr(default_dest, key, fallback) or fallback).strip()
+
+        ttk.Label(frame, text="Destination").grid(row=1, column=0, columnspan=4, sticky="w")
+        dest_fields = [
+            ("Full Name", "full_name"),
+            ("Address 1", "address_1"),
+            ("Address 2", "address_2"),
+            ("City", "city"),
+            ("State", "state"),
+            ("Postal Code", "postal_code"),
+            ("Country", "country"),
+            ("Phone", "phone"),
+            ("Email", "email"),
+        ]
+        dest_vars = {}
+        dest_start_row = 2
+        for pos, (label, key) in enumerate(dest_fields):
+            row = dest_start_row + (pos // 2)
+            col = 0 if pos % 2 == 0 else 2
+            ttk.Label(frame, text=f"{label}:").grid(row=row, column=col, sticky="w", padx=(0, 8), pady=3)
+            var = tk.StringVar(value=_initial_value(key, "US" if key == "country" else ""))
+            dest_vars[key] = var
+            ttk.Entry(frame, textvariable=var, width=28).grid(row=row, column=col + 1, sticky="ew", pady=3)
+
+        dest_end_row = dest_start_row + (len(dest_fields) - 1) // 2
+        pkg_row = dest_end_row + 1
+        ttk.Separator(frame, orient=tk.HORIZONTAL).grid(row=pkg_row, column=0, columnspan=4, sticky="ew", pady=(12, 8))
+        ttk.Label(frame, text="Package").grid(row=pkg_row + 1, column=0, sticky="w")
+        pkg_fields = [
+            ("Weight (oz)", "weight_oz"),
+            ("Length (in)", "length_in"),
+            ("Width (in)", "width_in"),
+            ("Height (in)", "height_in"),
+            ("Mail Class (optional)", "mail_class"),
+        ]
+        pkg_vars = {}
+        for idx, (label, key) in enumerate(pkg_fields, start=pkg_row + 2):
+            ttk.Label(frame, text=f"{label}:").grid(row=idx, column=0, sticky="w", padx=(0, 8), pady=3)
+            var = tk.StringVar(value=str(saved_package.get(key, "") or ""))
+            pkg_vars[key] = var
+            ttk.Entry(frame, textvariable=var, width=28).grid(row=idx, column=1, sticky="ew", pady=3)
+
+        tracking_row = pkg_row + 2 + len(pkg_fields)
+        ttk.Label(frame, text="Tracking Number:").grid(row=tracking_row, column=0, sticky="w", pady=(8, 3))
+        tracking_var = tk.StringVar(value=str(shipment.get("tracking_number", "") or order.shipped_track or ""))
+        ttk.Entry(frame, textvariable=tracking_var, width=28).grid(row=tracking_row, column=1, sticky="ew", pady=(8, 3))
+
+        output = tk.Text(frame, height=14, width=90)
+        output.grid(row=tracking_row + 1, column=0, columnspan=4, sticky="nsew", pady=(10, 0))
+        frame.rowconfigure(tracking_row + 1, weight=1)
+        for col in range(4):
+            frame.columnconfigure(col, weight=1 if col in {1, 3} else 0)
+
+        def append_result(title: str, payload):
+            output.insert(tk.END, f"\n=== {title} ===\n")
+            if isinstance(payload, (dict, list)):
+                output.insert(tk.END, json.dumps(payload, indent=2, default=str) + "\n")
+            else:
+                output.insert(tk.END, str(payload) + "\n")
+            output.see(tk.END)
+
+        def build_destination():
+            return ShippingAddress(**{key: var.get().strip() for key, var in dest_vars.items()})
+
+        def build_package():
+            return PackageDetails(**{key: var.get().strip() for key, var in pkg_vars.items()})
+
+        def save_shipment_metadata(extra=None):
+            current = self.get_order_state(order.id).get("usps_shipment", {})
+            if not isinstance(current, dict):
+                current = {}
+            payload = {
+                "destination": asdict(build_destination()),
+                "package": asdict(build_package()),
+                "tracking_number": tracking_var.get().strip(),
+                "selected_rate": selected_rate_holder["value"] if isinstance(selected_rate_holder["value"], dict) else {},
+                "updated_at": datetime.now().isoformat(timespec="seconds"),
+            }
+            if extra:
+                payload.update(extra)
+            merged = dict(current)
+            merged.update(payload)
+            self.update_order_state(order.id, usps_shipment=merged)
+
+        def run_action(action_name, action):
+            try:
+                result = action()
+                append_result(action_name, result)
+                return result
+            except USPSNotConfiguredError as exc:
+                messagebox.showerror("USPS Not Configured", str(exc))
+                return None
+            except USPSServiceError as exc:
+                append_result(action_name, f"Error: {exc}")
+                messagebox.showerror("USPS Error", str(exc))
+                return None
+            except Exception as exc:
+                append_result(action_name, f"Unexpected error: {exc}")
+                messagebox.showerror("USPS Error", str(exc))
+                return None
+
+        def validate_address():
+            result = run_action("Validate Address", lambda: self.usps_service.validate_address(build_destination()))
+            if result is not None:
+                save_shipment_metadata({"last_validated_at": datetime.now().isoformat(timespec="seconds"), "last_error": ""})
+
+        def fetch_rates():
+            result = run_action(
+                "Fetch Domestic Rates",
+                lambda: self.usps_service.get_domestic_rates(build_destination(), build_package()),
+            )
+            if result is not None:
+                candidate_rate = {}
+                for key in ["selectedRate", "rate", "bestRate"]:
+                    if isinstance(result.get(key), dict):
+                        candidate_rate = result.get(key)
+                        break
+                if not candidate_rate:
+                    for key in ["rates", "priceOptions", "options"]:
+                        values = result.get(key)
+                        if isinstance(values, list) and values and isinstance(values[0], dict):
+                            candidate_rate = values[0]
+                            break
+                selected_rate_holder["value"] = candidate_rate
+                save_shipment_metadata({"last_rated_at": datetime.now().isoformat(timespec="seconds"), "last_error": ""})
+
+        def create_label():
+            result = run_action(
+                "Create Label",
+                lambda: self.usps_service.create_label(
+                    build_destination(),
+                    build_package(),
+                    selected_rate_holder["value"] if isinstance(selected_rate_holder["value"], dict) else {},
+                ),
+            )
+            if result is not None:
+                tracking = (
+                    str(result.get("trackingNumber", "") or result.get("tracking_number", "")).strip()
+                    or str((result.get("tracking") or {}).get("trackingNumber", "")).strip()
+                )
+                if tracking:
+                    tracking_var.set(tracking)
+                label_url = str(result.get("labelUrl", "") or result.get("label_url", "")).strip()
+                label_format = str(result.get("labelFormat", "") or result.get("label_format", "")).strip()
+                save_shipment_metadata(
+                    {
+                        "label": {"label_url": label_url, "label_format": label_format},
+                        "tracking_number": tracking_var.get().strip(),
+                        "label_created_at": datetime.now().isoformat(timespec="seconds"),
+                        "last_error": "",
+                    }
+                )
+
+        def track_package():
+            tracking_number = tracking_var.get().strip()
+            if not tracking_number:
+                messagebox.showwarning("Missing Tracking Number", "Enter or create a tracking number first.")
+                return
+            result = run_action("Track Package", lambda: self.usps_service.get_tracking(tracking_number))
+            if result is not None:
+                save_shipment_metadata({"last_tracked_at": datetime.now().isoformat(timespec="seconds"), "last_error": ""})
+
+        action_row = ttk.Frame(frame)
+        action_row.grid(row=tracking_row + 2, column=0, columnspan=4, sticky="w", pady=(10, 0))
+        ttk.Button(action_row, text="Validate Address", command=validate_address).pack(side=tk.LEFT, padx=4)
+        ttk.Button(action_row, text="Fetch Rates", command=fetch_rates).pack(side=tk.LEFT, padx=4)
+        ttk.Button(action_row, text="Create Label", command=create_label).pack(side=tk.LEFT, padx=4)
+        ttk.Button(action_row, text="Track Package", command=track_package).pack(side=tk.LEFT, padx=4)
+
+        close_row = ttk.Frame(frame)
+        close_row.grid(row=tracking_row + 3, column=0, columnspan=4, sticky="e", pady=(8, 0))
+        ttk.Button(close_row, text="Save & Close", command=lambda: (save_shipment_metadata(), top.destroy())).pack(side=tk.LEFT, padx=4)
+        ttk.Button(close_row, text="Cancel", command=top.destroy).pack(side=tk.LEFT, padx=4)
 
     def configure_zoho(self):
         preset_name = self.get_selected_preset_name() or "Default"
