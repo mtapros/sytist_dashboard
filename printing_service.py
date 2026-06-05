@@ -28,12 +28,22 @@ from models import CartItem, PrintJob
 PRODUCT_FOLDERS = {
     "5x7": "5x7",
     "4x6": "4x6",
+    "4x5": "4x5",
     "8x10": "8x10",
     "wallet": "Wallet",
     "button": "Button",
     "magnet": "Magnet",
     "7in": "7inStatuette",
     "10in": "10inStatuette",
+}
+
+# Maps size keys to (short_side, long_side) aspect ratio tuples.
+# 4x6 uses the 2x3 ratio (same proportions). 4x5 and 8x10 share the same ratio.
+PRINT_ASPECT_RATIOS = {
+    "4x6": (2, 3),
+    "4x5": (4, 5),
+    "5x7": (5, 7),
+    "8x10": (4, 5),
 }
 
 
@@ -64,6 +74,7 @@ class PrintingService:
 
         patterns = [
             (r'\b4\s*[x×]\s*6\b', "4x6"),
+            (r'\b4\s*[x×]\s*5\b', "4x5"),
             (r'\b5\s*[x×]\s*7\b', "5x7"),
             (r'\b8\s*[x×]\s*10\b', "8x10"),
             (r'\b7\s*(?:in|inch)?\s*statuette\b', "7in"),
@@ -79,6 +90,8 @@ class PrintingService:
         compact = t.replace(" ", "")
         if "4x6" in compact:
             return "4x6"
+        if "4x5" in compact:
+            return "4x5"
         if "5x7" in compact:
             return "5x7"
         if "8x10" in compact:
@@ -162,11 +175,43 @@ class PrintingService:
             sheet.paste(tile, pos)
         return sheet
 
+    def _center_crop_to_print_ratio(self, img, size_key):
+        """Center-crop *img* to the target print aspect ratio for *size_key*.
+
+        Returns *img* unchanged when *size_key* is not in PRINT_ASPECT_RATIOS
+        (e.g. button, magnet, statuettes) so existing flows are unaffected.
+        """
+        ratio = PRINT_ASPECT_RATIOS.get(size_key)
+        if ratio is None or not HAS_PIL:
+            return img
+        short_r, long_r = ratio
+        img_w, img_h = img.size
+        if img_w <= img_h:
+            # Portrait: width is the short side, height is the long side.
+            target_h = img_h
+            target_w = round(img_h * short_r / long_r)
+            if target_w > img_w:
+                target_w = img_w
+                target_h = round(img_w * long_r / short_r)
+        else:
+            # Landscape: width is the long side, height is the short side.
+            target_w = img_w
+            target_h = round(img_w * short_r / long_r)
+            if target_h > img_h:
+                target_h = img_h
+                target_w = round(img_h * long_r / short_r)
+        return ImageOps.fit(
+            img,
+            (target_w, target_h),
+            method=Image.Resampling.LANCZOS,
+            centering=(0.5, 0.5),
+        )
+
     def _prepare_image_for_job(self, job: PrintJob):
         img = self._load_image_for_job(job)
         if job.size_key == "wallet":
             return self._build_wallet_sheet(img)
-        return img
+        return self._center_crop_to_print_ratio(img, job.size_key)
 
     def execute_print_job(self, job: PrintJob, fallback_printer=None):
         if not HAS_WIN32 or not HAS_PIL:
@@ -189,7 +234,12 @@ class PrintingService:
             if (img.width > img.height) != (printable_w > printable_h):
                 img = img.rotate(90, expand=True)
 
-            img = img.resize((printable_w, printable_h), Image.Resampling.LANCZOS)
+            img = ImageOps.fit(
+                img,
+                (printable_w, printable_h),
+                method=Image.Resampling.LANCZOS,
+                centering=(0.5, 0.5),
+            )
 
             hdc.StartDoc(job.display_name)
             hdc.StartPage()
