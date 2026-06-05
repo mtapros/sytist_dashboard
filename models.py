@@ -90,3 +90,37 @@ class PrintJob:
     product: str
     size_key: str | None = None
     routed_printer: str | None = None
+
+
+@dataclass
+class ShippingAddress:
+    full_name: str = ""
+    address_1: str = ""
+    address_2: str = ""
+    city: str = ""
+    state: str = ""
+    postal_code: str = ""
+    country: str = "US"
+    phone: str = ""
+    email: str = ""
+
+
+@dataclass
+class PackageDetails:
+    weight_oz: str = ""
+    length_in: str = ""
+    width_in: str = ""
+    height_in: str = ""
+    mail_class: str = ""
+
+
+@dataclass
+class USPSShipmentMetadata:
+    tracking_number: str = ""
+    service_name: str = ""
+    rate_amount: str = ""
+    rate_currency: str = ""
+    label_url: str = ""
+    label_format: str = ""
+    label_created_at: str = ""
+    last_error: str = ""

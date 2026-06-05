@@ -19,6 +19,7 @@ DEFAULT_CONFIG = {
     },
     "printer_routes": {
         "4x6": "",
+        "4x5": "",
         "5x7": "",
         "8x10": "",
         "wallet": "",
@@ -26,6 +27,26 @@ DEFAULT_CONFIG = {
         "magnet": "",
         "7in": "",
         "10in": ""
+    },
+    "usps": {
+        "enabled": False,
+        "base_url": "https://api.usps.com",
+        "token_url": "",
+        "environment": "production",
+        "client_id": "",
+        "client_secret": "",
+        "timeout_seconds": 20,
+        "ship_from": {
+            "full_name": "",
+            "address_1": "",
+            "address_2": "",
+            "city": "",
+            "state": "",
+            "postal_code": "",
+            "country": "US",
+            "phone": "",
+            "email": "",
+        },
     }
 }
 
@@ -71,9 +92,30 @@ class ConfigStore:
         config.setdefault("selected_preset", DEFAULT_PRESET_NAME)
         config.setdefault("db_presets", {})
         config.setdefault("printer_routes", {})
+        config.setdefault("usps", {})
 
-        for key in ["4x6", "5x7", "8x10", "wallet", "button", "magnet", "7in", "10in"]:
+        for key in ["4x6", "4x5", "5x7", "8x10", "wallet", "button", "magnet", "7in", "10in"]:
             config["printer_routes"].setdefault(key, "")
+
+        usps = config["usps"]
+        usps.setdefault("enabled", False)
+        usps.setdefault("base_url", "https://api.usps.com")
+        usps.setdefault("token_url", "")
+        usps.setdefault("environment", "production")
+        usps.setdefault("client_id", "")
+        usps.setdefault("client_secret", "")
+        usps.setdefault("timeout_seconds", 20)
+        usps.setdefault("ship_from", {})
+        ship_from = usps["ship_from"]
+        ship_from.setdefault("full_name", "")
+        ship_from.setdefault("address_1", "")
+        ship_from.setdefault("address_2", "")
+        ship_from.setdefault("city", "")
+        ship_from.setdefault("state", "")
+        ship_from.setdefault("postal_code", "")
+        ship_from.setdefault("country", "US")
+        ship_from.setdefault("phone", "")
+        ship_from.setdefault("email", "")
 
         legacy_has_fields = any(key in config for key in ["host", "db_name", "db_user", "db_pass"])
         if legacy_has_fields:
