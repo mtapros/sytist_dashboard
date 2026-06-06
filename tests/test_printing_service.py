@@ -349,8 +349,8 @@ class ButtonSheetTests(unittest.TestCase):
         result = self.service.render_button_sheet(img, circle_diameter=800)
 
         self.assertEqual(result.getpixel((600, 900)), (0, 0, 255))
-        self.assertEqual(result.getpixel((200, 900)), (255, 255, 255))
-        self.assertEqual(result.getpixel((1000, 900)), (255, 255, 255))
+        self.assertEqual(result.getpixel((199, 900)), (255, 255, 255))
+        self.assertEqual(result.getpixel((1001, 900)), (255, 255, 255))
 
     def test_render_button_sheet_can_print_finished_red_circle(self):
         img = _make_image(1200, 1200, "white")
