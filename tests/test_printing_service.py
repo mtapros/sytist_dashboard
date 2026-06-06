@@ -1,9 +1,15 @@
 import unittest
 
-from PIL import Image
+from PIL import Image, ImageChops
 
-from models import PrintJob
-from printing_service import PRINT_ASPECT_RATIOS, PRODUCT_FOLDERS, PrintingService
+from models import PrintJob, ShippingAddress
+from printing_service import (
+    ADDRESS_LABEL_SIZE,
+    ADDRESS_LABEL_TEXT_WIDTH_RATIO,
+    PRINT_ASPECT_RATIOS,
+    PRODUCT_FOLDERS,
+    PrintingService,
+)
 
 
 def _make_image(width, height, color="red"):
@@ -227,6 +233,75 @@ class CenterCropTests(unittest.TestCase):
             self.assertEqual(result.size, (1500, 2100))
         finally:
             os.unlink(tmp_path)
+
+
+class AddressLabelTests(unittest.TestCase):
+    def setUp(self):
+        self.service = PrintingService(config={})
+
+    def test_address_lines_omit_us_country(self):
+        lines = self.service._address_lines_for_label(
+            ShippingAddress(
+                full_name="Jane Doe",
+                address_1="123 Main St",
+                city="Albany",
+                state="NY",
+                postal_code="12207",
+                country="US",
+            )
+        )
+        self.assertEqual(lines, ["Jane Doe", "123 Main St", "Albany, NY 12207"])
+
+    def test_address_lines_include_non_us_country(self):
+        lines = self.service._address_lines_for_label(
+            ShippingAddress(
+                full_name="Jane Doe",
+                address_1="123 Main St",
+                city="Toronto",
+                state="ON",
+                postal_code="M5V 2T6",
+                country="Canada",
+            )
+        )
+        self.assertEqual(lines[-1], "Canada")
+
+    def test_render_address_label_creates_centered_4x6_canvas(self):
+        img = self.service._render_address_label(
+            ShippingAddress(
+                full_name="Jane Doe",
+                address_1="123 Main Street",
+                address_2="Suite 4B",
+                city="Albany",
+                state="NY",
+                postal_code="12207",
+                country="US",
+            )
+        )
+
+        self.assertEqual(img.size, ADDRESS_LABEL_SIZE)
+        self.assertEqual(round(img.size[0] * ADDRESS_LABEL_TEXT_WIDTH_RATIO), 1080)
+        diff = ImageChops.difference(img, Image.new("RGB", img.size, "white"))
+        self.assertIsNotNone(diff.getbbox())
+
+    def test_prepare_image_for_address_job_uses_label_renderer(self):
+        job = PrintJob(
+            source_type="address",
+            source={},
+            display_name="Jane Doe",
+            product="4x6 Address Label",
+            size_key="4x6",
+            address=ShippingAddress(
+                full_name="Jane Doe",
+                address_1="123 Main Street",
+                city="Albany",
+                state="NY",
+                postal_code="12207",
+                country="US",
+            ),
+        )
+
+        result = self.service._prepare_image_for_job(job)
+        self.assertEqual(result.size, ADDRESS_LABEL_SIZE)
 
 
 if __name__ == "__main__":
