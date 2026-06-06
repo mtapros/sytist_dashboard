@@ -1,4 +1,5 @@
 import unittest
+from unittest import mock
 
 from PIL import Image, ImageChops
 
@@ -381,6 +382,86 @@ class ButtonSheetTests(unittest.TestCase):
 
         diff = ImageChops.difference(result, Image.new("RGB", result.size, "white"))
         self.assertIsNotNone(diff.getbbox())
+
+    def test_curved_text_bottom_outward_preserves_typed_order(self):
+        img = _make_image(1200, 1200, "white")
+        x_positions = []
+        original_paste = Image.Image.paste
+
+        def recording_paste(self_img, im, box=None, mask=None):
+            if mask is not None and isinstance(box, tuple) and len(box) == 2:
+                x_positions.append(box[0])
+            return original_paste(self_img, im, box=box, mask=mask)
+
+        with mock.patch.object(Image.Image, "paste", new=recording_paste):
+            self.service._draw_curved_button_text(
+                img,
+                {
+                    "text": "12",
+                    "position": "bottom",
+                    "inward": False,
+                    "font_family": "DejaVuSans.ttf",
+                    "font_size": 72,
+                    "color": "#000000",
+                    "style": "Regular",
+                    "char_spacing": 4,
+                },
+                (0, 0, 1199, 1199),
+            )
+
+        self.assertEqual(len(x_positions), 2)
+        self.assertLess(x_positions[0], x_positions[1])
+
+    def test_curved_text_bottom_outward_center_char_is_upright(self):
+        img = _make_image(1200, 1200, "white")
+        rotations = []
+        original_rotate = Image.Image.rotate
+
+        def recording_rotate(self_img, angle, *args, **kwargs):
+            rotations.append(angle)
+            return original_rotate(self_img, angle, *args, **kwargs)
+
+        with mock.patch.object(Image.Image, "rotate", new=recording_rotate):
+            self.service._draw_curved_button_text(
+                img,
+                {
+                    "text": "2",
+                    "position": "bottom",
+                    "inward": False,
+                    "font_family": "DejaVuSans.ttf",
+                    "font_size": 72,
+                    "color": "#000000",
+                    "style": "Regular",
+                    "char_spacing": 0,
+                },
+                (0, 0, 1199, 1199),
+            )
+
+        self.assertEqual(len(rotations), 1)
+        normalized = rotations[0] % 360
+        self.assertTrue(normalized < 2 or normalized > 358)
+
+    def test_render_button_sheet_can_add_lime_calibration_rectangle(self):
+        img = _make_image(1200, 1200, "white")
+        result = self.service.render_button_sheet(
+            img,
+            print_lime_calibration_rectangle=True,
+            lime_rectangle_width=1200,
+        )
+
+        self.assertEqual(result.getpixel((600, 0)), (0, 255, 0))
+        self.assertEqual(result.getpixel((0, 900)), (0, 255, 0))
+
+    def test_render_button_sheet_lime_rectangle_respects_width(self):
+        img = _make_image(1200, 1200, "white")
+        result = self.service.render_button_sheet(
+            img,
+            print_lime_calibration_rectangle=True,
+            lime_rectangle_width=800,
+        )
+
+        self.assertEqual(result.getpixel((600, 300)), (0, 255, 0))
+        self.assertEqual(result.getpixel((600, 0)), (255, 255, 255))
 
 
 if __name__ == "__main__":

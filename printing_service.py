@@ -311,6 +311,28 @@ class PrintingService:
             diameter = default
         return max(50, min(diameter, min(BUTTON_CROP_SIZE)))
 
+    @staticmethod
+    def _clamp_lime_rect_width(value, sheet_size, default=BUTTON_PRINT_SIZE[0]):
+        sheet_w, sheet_h = sheet_size
+        try:
+            width = int(round(float(value)))
+        except (TypeError, ValueError):
+            width = default
+        width = max(1, min(width, sheet_w))
+        max_width_by_height = int(sheet_h * 2 / 3)
+        width = min(width, max_width_by_height)
+        return max(1, width)
+
+    def _draw_lime_calibration_rectangle(self, img, width):
+        sheet_w, sheet_h = img.size
+        rect_w = self._clamp_lime_rect_width(width, (sheet_w, sheet_h))
+        rect_h = max(1, int(round(rect_w * 3 / 2)))
+        left = (sheet_w - rect_w) // 2
+        top = (sheet_h - rect_h) // 2
+        right = left + rect_w - 1
+        bottom = top + rect_h - 1
+        ImageDraw.Draw(img).rectangle((left, top, right, bottom), outline="lime", width=3)
+
     def _load_button_font(self, font_family, size, style="Regular"):
         size = max(1, int(round(size or 1)))
         style = (style or "Regular").lower()
@@ -399,14 +421,15 @@ class PrintingService:
         advances = [width + spacing for width in widths]
         total_arc = max(0, sum(advances) - spacing)
         cursor = -total_arc / 2
+        arc_direction = -1 if anchor_degrees in {90, 180} else 1
 
         for idx, char in enumerate(text):
             advance = advances[idx]
             midpoint = cursor + advance / 2
-            angle = math.radians(anchor_degrees) + midpoint / radius
+            angle = math.radians(anchor_degrees) + (arc_direction * midpoint / radius)
             x = center[0] + math.cos(angle) * radius
             y = center[1] + math.sin(angle) * radius
-            rotation = math.degrees(angle) + 90
+            rotation = math.degrees(angle) + (90 * arc_direction)
             if inward:
                 rotation += 180
 
@@ -432,6 +455,8 @@ class PrintingService:
         finished_diameter=None,
         print_finished_circle=False,
         curved_text=None,
+        print_lime_calibration_rectangle=False,
+        lime_rectangle_width=None,
     ):
         """Render a circular button image centered on a 4x6 sheet."""
         if not HAS_PIL:
@@ -496,6 +521,8 @@ class PrintingService:
 
         sheet = Image.new("RGB", BUTTON_PRINT_SIZE, "white")
         sheet.paste(circled, ((sheet_w - crop_w) // 2, (sheet_h - crop_h) // 2))
+        if print_lime_calibration_rectangle:
+            self._draw_lime_calibration_rectangle(sheet, lime_rectangle_width)
         return sheet
 
     def _center_crop_to_print_ratio(self, img, size_key):

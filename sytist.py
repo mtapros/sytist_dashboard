@@ -1151,6 +1151,8 @@ class SytistDashboard:
         outer_diameter_var = tk.StringVar(value=str(BUTTON_DEFAULT_DIAMETER))
         finished_diameter_var = tk.StringVar(value=str(BUTTON_DEFAULT_FINISHED_DIAMETER))
         print_finished_var = tk.BooleanVar(value=True)
+        print_lime_rect_var = tk.BooleanVar(value=False)
+        lime_rect_width_var = tk.StringVar(value=str(BUTTON_PRINT_SIZE[0]))
         text_var = tk.StringVar()
         position_var = tk.StringVar(value="top")
         facing_var = tk.StringVar(value="outward")
@@ -1177,6 +1179,9 @@ class SytistDashboard:
         ttk.Label(template_frame, text="Finished red circle diameter (px):").grid(row=1, column=0, sticky="w", pady=3)
         ttk.Spinbox(template_frame, from_=50, to=min(BUTTON_CROP_SIZE), increment=1, textvariable=finished_diameter_var, width=10).grid(row=1, column=1, sticky="w", padx=6, pady=3)
         ttk.Checkbutton(template_frame, text="Print red finished-button circle", variable=print_finished_var).grid(row=2, column=0, columnspan=2, sticky="w", pady=3)
+        ttk.Checkbutton(template_frame, text="Print lime green 2:3 calibration rectangle", variable=print_lime_rect_var).grid(row=3, column=0, columnspan=2, sticky="w", pady=3)
+        ttk.Label(template_frame, text="Lime rectangle width (px):").grid(row=4, column=0, sticky="w", pady=3)
+        ttk.Spinbox(template_frame, from_=1, to=BUTTON_PRINT_SIZE[0], increment=1, textvariable=lime_rect_width_var, width=10).grid(row=4, column=1, sticky="w", padx=6, pady=3)
 
         text_frame = ttk.LabelFrame(controls, text="Curved text", padding=8)
         text_frame.pack(fill=tk.X)
@@ -1209,6 +1214,8 @@ class SytistDashboard:
                 circle_diameter=outer_diameter_var.get(),
                 finished_diameter=finished_diameter_var.get(),
                 print_finished_circle=print_finished_var.get(),
+                print_lime_calibration_rectangle=print_lime_rect_var.get(),
+                lime_rectangle_width=lime_rect_width_var.get(),
                 curved_text={
                     "text": text_var.get(),
                     "position": position_var.get(),
@@ -1274,6 +1281,8 @@ class SytistDashboard:
             outer_diameter_var,
             finished_diameter_var,
             print_finished_var,
+            print_lime_rect_var,
+            lime_rect_width_var,
             text_var,
             position_var,
             facing_var,
