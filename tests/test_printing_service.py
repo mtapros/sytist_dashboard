@@ -412,7 +412,7 @@ class ButtonSheetTests(unittest.TestCase):
         self.assertEqual(len(x_positions), 2)
         self.assertLess(x_positions[0], x_positions[1])
 
-    def test_curved_text_bottom_outward_center_char_is_upright(self):
+    def test_curved_text_bottom_outward_center_char_uses_bottom_tangent(self):
         img = _make_image(1200, 1200, "white")
         rotations = []
         original_rotate = Image.Image.rotate
@@ -439,7 +439,39 @@ class ButtonSheetTests(unittest.TestCase):
 
         self.assertEqual(len(rotations), 1)
         normalized = rotations[0] % 360
-        self.assertTrue(normalized < 2 or normalized > 358)
+        self.assertAlmostEqual(normalized, 180, delta=2)
+
+    def test_curved_text_bottom_outward_leans_along_bottom_arc(self):
+        img = _make_image(1200, 1200, "white")
+        rotations = []
+        original_rotate = Image.Image.rotate
+
+        def recording_rotate(self_img, angle, *args, **kwargs):
+            rotations.append(angle)
+            return original_rotate(self_img, angle, *args, **kwargs)
+
+        with mock.patch.object(Image.Image, "rotate", new=recording_rotate):
+            self.service._draw_curved_button_text(
+                img,
+                {
+                    "text": "2026",
+                    "position": "bottom",
+                    "inward": False,
+                    "font_family": "DejaVuSans.ttf",
+                    "font_size": 72,
+                    "color": "#000000",
+                    "style": "Regular",
+                    "char_spacing": 4,
+                },
+                (0, 0, 1199, 1199),
+            )
+
+        self.assertEqual(len(rotations), 4)
+        normalized = [angle % 360 for angle in rotations]
+        self.assertGreater(normalized[0], 180)
+        self.assertGreater(normalized[1], 180)
+        self.assertLess(normalized[2], 180)
+        self.assertLess(normalized[3], 180)
 
     def test_render_button_sheet_can_add_lime_calibration_rectangle(self):
         img = _make_image(1200, 1200, "white")

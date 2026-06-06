@@ -429,7 +429,7 @@ class PrintingService:
             angle = math.radians(anchor_degrees) + (arc_direction * midpoint / radius)
             x = center[0] + math.cos(angle) * radius
             y = center[1] + math.sin(angle) * radius
-            rotation = math.degrees(angle) + (90 * arc_direction)
+            rotation = math.degrees(angle) + 90
             if inward:
                 rotation += 180
 
