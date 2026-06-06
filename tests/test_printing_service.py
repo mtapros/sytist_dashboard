@@ -6,6 +6,8 @@ from models import PrintJob, ShippingAddress
 from printing_service import (
     ADDRESS_LABEL_SIZE,
     ADDRESS_LABEL_TEXT_WIDTH_RATIO,
+    BUTTON_CROP_SIZE,
+    BUTTON_PRINT_SIZE,
     PRINT_ASPECT_RATIOS,
     PRODUCT_FOLDERS,
     PrintingService,
@@ -302,6 +304,43 @@ class AddressLabelTests(unittest.TestCase):
 
         result = self.service._prepare_image_for_job(job)
         self.assertEqual(result.size, ADDRESS_LABEL_SIZE)
+
+
+class ButtonSheetTests(unittest.TestCase):
+    def setUp(self):
+        self.service = PrintingService(config={})
+
+    def test_render_button_sheet_creates_centered_4x6_canvas(self):
+        img = _make_image(500, 500, "red")
+        result = self.service.render_button_sheet(img)
+
+        self.assertEqual(result.size, BUTTON_PRINT_SIZE)
+        self.assertEqual(BUTTON_CROP_SIZE, (1200, 1200))
+        self.assertEqual(result.getpixel((600, 900)), (255, 0, 0))
+        self.assertEqual(result.getpixel((0, 0)), (255, 255, 255))
+        self.assertEqual(result.getpixel((0, 300)), (255, 255, 255))
+
+    def test_render_button_sheet_keeps_circle_only_over_white_page(self):
+        img = _make_image(1000, 500, "blue")
+        result = self.service.render_button_sheet(img, scale=2.4, offset=(-600, 0))
+
+        self.assertEqual(result.getpixel((600, 900)), (0, 0, 255))
+        self.assertEqual(result.getpixel((10, 310)), (255, 255, 255))
+        self.assertEqual(result.getpixel((1190, 310)), (255, 255, 255))
+
+    def test_prepare_image_for_pil_job_returns_rgb_image(self):
+        img = Image.new("RGBA", (20, 20), (255, 0, 0, 128))
+        job = PrintJob(
+            source_type="pil",
+            source=img,
+            display_name="button.png",
+            product="Button",
+            size_key="button",
+        )
+
+        result = self.service._prepare_image_for_job(job)
+        self.assertEqual(result.mode, "RGB")
+        self.assertEqual(result.size, (20, 20))
 
 
 if __name__ == "__main__":

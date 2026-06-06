@@ -54,6 +54,8 @@ ADDRESS_LABEL_TEXT_HEIGHT_RATIO = 0.70
 ADDRESS_LABEL_LINE_SPACING_RATIO = 0.22
 ADDRESS_LABEL_FONT_MAX = 140
 ADDRESS_LABEL_FONT_MIN = 36
+BUTTON_PRINT_SIZE = (1200, 1800)
+BUTTON_CROP_SIZE = (1200, 1200)
 
 
 class PrintingService:
@@ -297,6 +299,43 @@ class PrintingService:
             sheet.paste(tile, pos)
         return sheet
 
+    def render_button_sheet(self, img, scale=None, offset=None):
+        """Render a circular 4-inch button image centered on a 4x6 sheet."""
+        if not HAS_PIL:
+            raise RuntimeError("Please run: pip install pillow")
+
+        source = img.convert("RGB") if img.mode != "RGB" else img
+        crop_w, crop_h = BUTTON_CROP_SIZE
+        sheet_w, sheet_h = BUTTON_PRINT_SIZE
+        if scale is None:
+            scale = max(crop_w / source.width, crop_h / source.height)
+        scale = max(float(scale), 0.01)
+        resized_size = (
+            max(1, round(source.width * scale)),
+            max(1, round(source.height * scale)),
+        )
+        if offset is None:
+            offset = (
+                round((crop_w - resized_size[0]) / 2),
+                round((crop_h - resized_size[1]) / 2),
+            )
+        else:
+            offset = (round(offset[0]), round(offset[1]))
+
+        resized = source.resize(resized_size, Image.Resampling.LANCZOS)
+        crop = Image.new("RGB", BUTTON_CROP_SIZE, "white")
+        crop.paste(resized, offset)
+
+        circle_mask = Image.new("L", BUTTON_CROP_SIZE, 0)
+        draw = ImageDraw.Draw(circle_mask)
+        draw.ellipse((0, 0, crop_w - 1, crop_h - 1), fill=255)
+        circled = Image.new("RGB", BUTTON_CROP_SIZE, "white")
+        circled.paste(crop, (0, 0), circle_mask)
+
+        sheet = Image.new("RGB", BUTTON_PRINT_SIZE, "white")
+        sheet.paste(circled, ((sheet_w - crop_w) // 2, (sheet_h - crop_h) // 2))
+        return sheet
+
     def _center_crop_to_print_ratio(self, img, size_key):
         """Center-crop *img* to the target print aspect ratio for *size_key*.
 
@@ -332,6 +371,9 @@ class PrintingService:
     def _prepare_image_for_job(self, job: PrintJob):
         if job.source_type == "address":
             return self._render_address_label(job.address)
+        if job.source_type == "pil":
+            img = job.source
+            return img.convert("RGB") if img.mode != "RGB" else img
         img = self._load_image_for_job(job)
         if job.size_key == "wallet":
             return self._build_wallet_sheet(img)
