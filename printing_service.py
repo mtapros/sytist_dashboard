@@ -423,13 +423,20 @@ class PrintingService:
         cursor = -total_arc / 2
         arc_direction = -1 if anchor_degrees in {90, 180} else 1
 
-        for idx, char in enumerate(text):
-            advance = advances[idx]
+        placements = []
+        for advance in advances:
             midpoint = cursor + advance / 2
             angle = math.radians(anchor_degrees) + (arc_direction * midpoint / radius)
             x = center[0] + math.cos(angle) * radius
             y = center[1] + math.sin(angle) * radius
-            rotation = math.degrees(angle) + 90
+            placements.append((angle, x, y))
+            cursor += advance
+
+        rotation_angles = [placement[0] for placement in reversed(placements)]
+
+        for idx, char in enumerate(text):
+            _, x, y = placements[idx]
+            rotation = math.degrees(rotation_angles[idx]) + 90
             if inward:
                 rotation += 180
 
@@ -444,7 +451,6 @@ class PrintingService:
                 (round(x - rotated.width / 2), round(y - rotated.height / 2)),
                 rotated,
             )
-            cursor += advance
 
     def render_button_sheet(
         self,
