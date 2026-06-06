@@ -83,16 +83,6 @@ class PhotoPath:
 
 
 @dataclass
-class PrintJob:
-    source_type: str
-    source: str
-    display_name: str
-    product: str
-    size_key: str | None = None
-    routed_printer: str | None = None
-
-
-@dataclass
 class ShippingAddress:
     full_name: str = ""
     address_1: str = ""
@@ -103,6 +93,17 @@ class ShippingAddress:
     country: str = "US"
     phone: str = ""
     email: str = ""
+
+
+@dataclass
+class PrintJob:
+    source_type: str
+    source: Any
+    display_name: str
+    product: str
+    size_key: str | None = None
+    routed_printer: str | None = None
+    address: "ShippingAddress | None" = None
 
 
 @dataclass

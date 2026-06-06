@@ -4,11 +4,13 @@ import re
 import urllib.request
 
 try:
-    from PIL import Image, ImageOps, ImageWin
+    from PIL import Image, ImageDraw, ImageFont, ImageOps, ImageWin
     HAS_PIL = True
 except ImportError:
     HAS_PIL = False
     Image = None
+    ImageDraw = None
+    ImageFont = None
     ImageOps = None
     ImageWin = None
 
@@ -23,7 +25,7 @@ except ImportError:
     win32print = None
     win32ui = None
 
-from models import CartItem, PrintJob
+from models import CartItem, PrintJob, ShippingAddress
 
 PRODUCT_FOLDERS = {
     "5x7": "5x7",
@@ -45,6 +47,13 @@ PRINT_ASPECT_RATIOS = {
     "5x7": (5, 7),
     "8x10": (4, 5),
 }
+
+ADDRESS_LABEL_SIZE = (1800, 1200)
+ADDRESS_LABEL_TEXT_WIDTH_RATIO = 0.60
+ADDRESS_LABEL_TEXT_HEIGHT_RATIO = 0.70
+ADDRESS_LABEL_LINE_SPACING_RATIO = 0.22
+ADDRESS_LABEL_FONT_MAX = 140
+ADDRESS_LABEL_FONT_MIN = 36
 
 
 class PrintingService:
@@ -153,6 +162,119 @@ class PrintingService:
             img = img.convert('RGB')
         return img
 
+    @staticmethod
+    def _address_lines_for_label(address: ShippingAddress):
+        if not address:
+            return []
+
+        lines = []
+        for value in [address.full_name, address.address_1, address.address_2]:
+            text = str(value or "").strip()
+            if text:
+                lines.append(text)
+
+        city = str(address.city or "").strip()
+        state = str(address.state or "").strip()
+        postal_code = str(address.postal_code or "").strip()
+        locality = ""
+        if city and state:
+            locality = f"{city}, {state}"
+        else:
+            locality = city or state
+        if postal_code:
+            locality = f"{locality} {postal_code}".strip()
+        if locality:
+            lines.append(locality)
+
+        country = str(address.country or "").strip()
+        if country and country.upper() not in {"US", "USA", "UNITED STATES", "UNITED STATES OF AMERICA"}:
+            lines.append(country)
+        return lines
+
+    def _load_address_label_font(self, size):
+        for font_name in ("DejaVuSans.ttf", "Arial.ttf", "arial.ttf"):
+            try:
+                return ImageFont.truetype(font_name, size=size)
+            except OSError:
+                continue
+        return ImageFont.load_default()
+
+    @staticmethod
+    def _measure_text(draw, text, font):
+        bbox = draw.textbbox((0, 0), text, font=font)
+        return bbox[2] - bbox[0], bbox[3] - bbox[1]
+
+    def _wrap_text_for_width(self, draw, text, font, max_width):
+        words = text.split()
+        if not words:
+            return [""]
+
+        lines = []
+        current = words[0]
+        for word in words[1:]:
+            candidate = f"{current} {word}"
+            width, _ = self._measure_text(draw, candidate, font)
+            if width <= max_width:
+                current = candidate
+            else:
+                lines.append(current)
+                current = word
+        lines.append(current)
+        return lines
+
+    def _render_address_label(self, address: ShippingAddress):
+        if not HAS_PIL:
+            raise RuntimeError("Please run: pip install pillow")
+
+        lines = self._address_lines_for_label(address)
+        if not lines:
+            raise ValueError("Address label requires at least one address line")
+
+        canvas_w, canvas_h = ADDRESS_LABEL_SIZE
+        text_block_w = round(canvas_w * ADDRESS_LABEL_TEXT_WIDTH_RATIO)
+        max_text_h = round(canvas_h * ADDRESS_LABEL_TEXT_HEIGHT_RATIO)
+        img = Image.new("RGB", ADDRESS_LABEL_SIZE, "white")
+        draw = ImageDraw.Draw(img)
+
+        selected_font = None
+        selected_lines = []
+        selected_spacing = 0
+        for size in range(ADDRESS_LABEL_FONT_MAX, ADDRESS_LABEL_FONT_MIN - 1, -4):
+            font = self._load_address_label_font(size)
+            spacing = max(8, int(size * ADDRESS_LABEL_LINE_SPACING_RATIO))
+            wrapped_lines = []
+            for line in lines:
+                wrapped_lines.extend(self._wrap_text_for_width(draw, line, font, text_block_w))
+
+            heights = [self._measure_text(draw, line, font)[1] for line in wrapped_lines]
+            total_height = sum(heights) + spacing * max(0, len(wrapped_lines) - 1)
+            widest_line = max((self._measure_text(draw, line, font)[0] for line in wrapped_lines), default=0)
+            if total_height <= max_text_h and widest_line <= text_block_w:
+                selected_font = font
+                selected_lines = wrapped_lines
+                selected_spacing = spacing
+                break
+
+        if selected_font is None:
+            selected_font = self._load_address_label_font(ADDRESS_LABEL_FONT_MIN)
+            selected_spacing = max(8, int(ADDRESS_LABEL_FONT_MIN * ADDRESS_LABEL_LINE_SPACING_RATIO))
+            for line in lines:
+                selected_lines.extend(self._wrap_text_for_width(draw, line, selected_font, text_block_w))
+
+        heights = [self._measure_text(draw, line, selected_font)[1] for line in selected_lines]
+        total_height = sum(heights) + selected_spacing * max(0, len(selected_lines) - 1)
+        y = max(0, (canvas_h - total_height) // 2)
+        text_block_x = (canvas_w - text_block_w) // 2
+
+        for idx, line in enumerate(selected_lines):
+            width, height = self._measure_text(draw, line, selected_font)
+            x = text_block_x + max(0, (text_block_w - width) // 2)
+            draw.text((x, y), line, fill="black", font=selected_font)
+            y += height
+            if idx < len(selected_lines) - 1:
+                y += selected_spacing
+        return img
+
     def _build_wallet_sheet(self, img):
         sheet_w, sheet_h = 1500, 2100
         tile_w, tile_h = sheet_w // 2, sheet_h // 2
@@ -208,6 +330,8 @@ class PrintingService:
         )
 
     def _prepare_image_for_job(self, job: PrintJob):
+        if job.source_type == "address":
+            return self._render_address_label(job.address)
         img = self._load_image_for_job(job)
         if job.size_key == "wallet":
             return self._build_wallet_sheet(img)

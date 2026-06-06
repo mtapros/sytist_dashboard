@@ -302,6 +302,7 @@ class SytistDashboard:
         ttk.Button(row1, text="Printer Routing", command=self.configure_printer_routing).pack(side=tk.LEFT, padx=5)
         ttk.Button(row1, text="Print Selected Orders", command=self.print_selected_orders).pack(side=tk.LEFT, padx=5)
         ttk.Button(row1, text="Print Image Files", command=self.print_image_files).pack(side=tk.LEFT, padx=5)
+        ttk.Button(row1, text="Print 4x6 Address", command=self.open_address_print_dialog).pack(side=tk.LEFT, padx=5)
 
         ttk.Separator(row1, orient=tk.VERTICAL).pack(side=tk.LEFT, padx=15, fill=tk.Y)
         ttk.Button(row1, text="USPS Setup", command=self.configure_usps).pack(side=tk.LEFT, padx=5)
@@ -1064,6 +1065,114 @@ class SytistDashboard:
 
         jobs = self.build_file_print_jobs(filepaths, chosen_type)
         self.start_print_workflow(jobs, "Image File Print")
+
+    def get_address_prefill_order(self):
+        selected_rows = self.tree_orders.selection()
+        if selected_rows:
+            order_id = str(self.tree_orders.item(selected_rows[0])["values"][1])
+            return self.get_order_by_id(order_id)
+
+        selected_orders = self.get_selected_orders()
+        if len(selected_orders) == 1:
+            return selected_orders[0]
+        if len(selected_orders) > 1:
+            messagebox.showinfo(
+                "Manual Entry Required",
+                "Multiple orders are checked, so the 4x6 address form will open blank. "
+                "Select a single order row if you want to prefill an address.",
+            )
+        return None
+
+    def open_address_print_dialog(self):
+        if not HAS_WIN32 or not HAS_PIL:
+            messagebox.showerror("Missing Library", "Please run: pip install pywin32 pillow")
+            return
+
+        order = self.get_address_prefill_order()
+        default_address = self.build_order_shipping_address(order) if order else ShippingAddress(country="US")
+
+        top = tk.Toplevel(self.root)
+        top.title("Print 4x6 Address")
+        top.geometry("760x360")
+        top.transient(self.root)
+        top.grab_set()
+
+        frame = ttk.Frame(top, padding=12)
+        frame.pack(fill=tk.BOTH, expand=True)
+
+        if order:
+            heading = f"Address prefilled from order {order.id}. Edit any field before printing."
+        else:
+            heading = "Enter an address manually, or select one order first to prefill the form."
+        ttk.Label(frame, text=heading, wraplength=700, justify=tk.LEFT).grid(row=0, column=0, columnspan=4, sticky="w", pady=(0, 10))
+
+        fields = [
+            ("Full Name", "full_name"),
+            ("Address 1", "address_1"),
+            ("Address 2", "address_2"),
+            ("City", "city"),
+            ("State", "state"),
+            ("Postal Code", "postal_code"),
+            ("Country", "country"),
+        ]
+        vars_map = {}
+        for pos, (label, key) in enumerate(fields):
+            row = 1 + (pos // 2)
+            col = 0 if pos % 2 == 0 else 2
+            ttk.Label(frame, text=f"{label}:").grid(row=row, column=col, sticky="w", padx=(0, 8), pady=4)
+            value = str(getattr(default_address, key, "") or ("US" if key == "country" else ""))
+            var = tk.StringVar(value=value)
+            vars_map[key] = var
+            ttk.Entry(frame, textvariable=var, width=28).grid(row=row, column=col + 1, sticky="ew", pady=4)
+
+        preview_note = ttk.Label(
+            frame,
+            text="The address block prints centered on a 4x6 landscape card at 60% of the 6-inch width.",
+            foreground="#666666",
+            wraplength=700,
+            justify=tk.LEFT,
+        )
+        preview_note.grid(row=5, column=0, columnspan=4, sticky="w", pady=(8, 0))
+
+        for col in range(4):
+            frame.columnconfigure(col, weight=1 if col in {1, 3} else 0)
+
+        def build_address():
+            return ShippingAddress(**{key: var.get().strip() for key, var in vars_map.items()})
+
+        def print_address():
+            address = build_address()
+            required = {
+                "Full Name": address.full_name,
+                "Address 1": address.address_1,
+                "City": address.city,
+                "State": address.state,
+                "Postal Code": address.postal_code,
+            }
+            missing = [label for label, value in required.items() if not str(value or "").strip()]
+            if missing:
+                messagebox.showwarning("Missing Address Fields", "Please fill: " + ", ".join(missing))
+                return
+
+            top.destroy()
+            self.start_print_workflow(
+                [
+                    PrintJob(
+                        source_type="address",
+                        source=asdict(address),
+                        display_name=(address.full_name or "address_label").strip(),
+                        product="4x6 Address Label",
+                        size_key="4x6",
+                        address=address,
+                    )
+                ],
+                "4x6 Address Print",
+            )
+
+        button_row = ttk.Frame(frame)
+        button_row.grid(row=6, column=0, columnspan=4, sticky="e", pady=(16, 0))
+        ttk.Button(button_row, text="Print", command=print_address).pack(side=tk.LEFT, padx=4)
+        ttk.Button(button_row, text="Cancel", command=top.destroy).pack(side=tk.LEFT, padx=4)
 
     def start_print_workflow(self, jobs, title_text):
         if not jobs:

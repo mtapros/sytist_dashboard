@@ -79,6 +79,8 @@ The app includes an initial USPS workflow:
 - **USPS Setup** button to configure USPS cloud API settings
 - **USPS Ship Selected** button to open shipping actions for one selected order
 - Destination prefill from Sytist order shipping fields
+- **Print 4x6 Address** button to print a centered 4x6 address card, either
+  prefilled from one selected order or entered manually
 - API actions scaffolded for:
   - address validation
   - domestic rates
