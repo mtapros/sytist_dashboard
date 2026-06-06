@@ -1153,6 +1153,10 @@ class SytistDashboard:
         print_finished_var = tk.BooleanVar(value=True)
         print_lime_rect_var = tk.BooleanVar(value=False)
         lime_rect_width_var = tk.StringVar(value=str(BUTTON_PRINT_SIZE[0]))
+        circle_offset_x_var = tk.StringVar(value="0")
+        circle_offset_y_var = tk.StringVar(value="0")
+        edge_border_var = tk.BooleanVar(value=False)
+        print_params_var = tk.BooleanVar(value=False)
         text_var = tk.StringVar()
         position_var = tk.StringVar(value="top")
         facing_var = tk.StringVar(value="outward")
@@ -1161,6 +1165,8 @@ class SytistDashboard:
         text_style_var = tk.StringVar(value="Regular")
         char_spacing_var = tk.StringVar(value="0")
         radius_offset_var = tk.StringVar(value="0")
+        stroke_color_var = tk.StringVar(value="#000000")
+        stroke_width_var = tk.StringVar(value="0")
         try:
             font_values = sorted(tkfont.families(root=top))
         except Exception:
@@ -1172,8 +1178,13 @@ class SytistDashboard:
             if color:
                 text_color_var.set(color)
 
+        def choose_stroke_color():
+            _, color = colorchooser.askcolor(color=stroke_color_var.get() or "#000000", parent=top)
+            if color:
+                stroke_color_var.set(color)
+
         template_frame = ttk.LabelFrame(controls, text="Template circles", padding=8)
-        template_frame.pack(fill=tk.X, pady=(0, 10))
+        template_frame.pack(fill=tk.X, pady=(0, 6))
         ttk.Label(template_frame, text="Outer circle diameter (px):").grid(row=0, column=0, sticky="w", pady=3)
         ttk.Spinbox(template_frame, from_=50, to=min(BUTTON_CROP_SIZE), increment=1, textvariable=outer_diameter_var, width=10).grid(row=0, column=1, sticky="w", padx=6, pady=3)
         ttk.Label(template_frame, text="Finished red circle diameter (px):").grid(row=1, column=0, sticky="w", pady=3)
@@ -1182,6 +1193,43 @@ class SytistDashboard:
         ttk.Checkbutton(template_frame, text="Print lime green 2:3 calibration rectangle", variable=print_lime_rect_var).grid(row=3, column=0, columnspan=2, sticky="w", pady=3)
         ttk.Label(template_frame, text="Lime rectangle width (px):").grid(row=4, column=0, sticky="w", pady=3)
         ttk.Spinbox(template_frame, from_=1, to=BUTTON_PRINT_SIZE[0], increment=1, textvariable=lime_rect_width_var, width=10).grid(row=4, column=1, sticky="w", padx=6, pady=3)
+        ttk.Checkbutton(template_frame, text="Yellow edge border around main circle", variable=edge_border_var).grid(row=5, column=0, columnspan=2, sticky="w", pady=3)
+        ttk.Checkbutton(template_frame, text="Print parameters on output", variable=print_params_var).grid(row=6, column=0, columnspan=2, sticky="w", pady=3)
+
+        circle_pos_frame = ttk.LabelFrame(controls, text="Circle position (D-pad)", padding=8)
+        circle_pos_frame.pack(fill=tk.X, pady=(0, 6))
+        ttk.Label(circle_pos_frame, text="Offset X (px):").grid(row=0, column=0, sticky="w", pady=2)
+        ttk.Spinbox(circle_pos_frame, from_=-min(BUTTON_CROP_SIZE), to=min(BUTTON_CROP_SIZE), increment=1, textvariable=circle_offset_x_var, width=8).grid(row=0, column=1, sticky="w", padx=6, pady=2)
+        ttk.Label(circle_pos_frame, text="Offset Y (px):").grid(row=0, column=2, sticky="w", pady=2)
+        ttk.Spinbox(circle_pos_frame, from_=-min(BUTTON_CROP_SIZE), to=min(BUTTON_CROP_SIZE), increment=1, textvariable=circle_offset_y_var, width=8).grid(row=0, column=3, sticky="w", padx=6, pady=2)
+
+        dpad_frame = ttk.Frame(circle_pos_frame)
+        dpad_frame.grid(row=1, column=0, columnspan=4, pady=4)
+        ttk.Label(dpad_frame, text="Step (px):").grid(row=0, column=0, sticky="e", padx=(0, 4))
+        dpad_step_var = tk.StringVar(value="10")
+        ttk.Spinbox(dpad_frame, from_=1, to=200, increment=1, textvariable=dpad_step_var, width=6).grid(row=0, column=1, sticky="w")
+
+        def _dpad_move(dx, dy):
+            try:
+                step = max(1, int(round(float(dpad_step_var.get()))))
+            except (TypeError, ValueError):
+                step = 10
+            try:
+                x = int(round(float(circle_offset_x_var.get())))
+            except (TypeError, ValueError):
+                x = 0
+            try:
+                y = int(round(float(circle_offset_y_var.get())))
+            except (TypeError, ValueError):
+                y = 0
+            circle_offset_x_var.set(str(x + dx * step))
+            circle_offset_y_var.set(str(y + dy * step))
+
+        ttk.Button(dpad_frame, text="↑", width=3, command=lambda: _dpad_move(0, -1)).grid(row=1, column=2, padx=2, pady=1)
+        ttk.Button(dpad_frame, text="←", width=3, command=lambda: _dpad_move(-1, 0)).grid(row=2, column=1, padx=2, pady=1)
+        ttk.Button(dpad_frame, text="●", width=3, command=lambda: [circle_offset_x_var.set("0"), circle_offset_y_var.set("0")]).grid(row=2, column=2, padx=2, pady=1)
+        ttk.Button(dpad_frame, text="→", width=3, command=lambda: _dpad_move(1, 0)).grid(row=2, column=3, padx=2, pady=1)
+        ttk.Button(dpad_frame, text="↓", width=3, command=lambda: _dpad_move(0, 1)).grid(row=3, column=2, padx=2, pady=1)
 
         text_frame = ttk.LabelFrame(controls, text="Curved text", padding=8)
         text_frame.pack(fill=tk.X)
@@ -1204,9 +1252,22 @@ class SytistDashboard:
         ttk.Spinbox(text_frame, from_=-20, to=80, increment=1, textvariable=char_spacing_var, width=8).grid(row=4, column=3, sticky="w", padx=6, pady=3)
         ttk.Label(text_frame, text="Text inset from edge:").grid(row=5, column=0, sticky="w", pady=3)
         ttk.Spinbox(text_frame, from_=-100, to=400, increment=1, textvariable=radius_offset_var, width=8).grid(row=5, column=1, sticky="w", padx=6, pady=3)
+        ttk.Label(text_frame, text="Stroke color:").grid(row=6, column=0, sticky="w", pady=3)
+        ttk.Entry(text_frame, textvariable=stroke_color_var, width=12).grid(row=6, column=1, sticky="w", padx=6, pady=3)
+        ttk.Button(text_frame, text="Choose", command=choose_stroke_color).grid(row=6, column=2, sticky="w", pady=3)
+        ttk.Label(text_frame, text="Stroke width (px):").grid(row=7, column=0, sticky="w", pady=3)
+        ttk.Spinbox(text_frame, from_=0, to=40, increment=1, textvariable=stroke_width_var, width=8).grid(row=7, column=1, sticky="w", padx=6, pady=3)
         text_frame.columnconfigure(1, weight=1)
 
         def render_current_sheet():
+            try:
+                cx_off = int(round(float(circle_offset_x_var.get())))
+            except (TypeError, ValueError):
+                cx_off = 0
+            try:
+                cy_off = int(round(float(circle_offset_y_var.get())))
+            except (TypeError, ValueError):
+                cy_off = 0
             return self.printing_service.render_button_sheet(
                 state["source"],
                 scale=state["scale"],
@@ -1216,6 +1277,9 @@ class SytistDashboard:
                 print_finished_circle=print_finished_var.get(),
                 print_lime_calibration_rectangle=print_lime_rect_var.get(),
                 lime_rectangle_width=lime_rect_width_var.get(),
+                circle_offset=(cx_off, cy_off),
+                edge_border=edge_border_var.get(),
+                print_params=print_params_var.get(),
                 curved_text={
                     "text": text_var.get(),
                     "position": position_var.get(),
@@ -1226,6 +1290,8 @@ class SytistDashboard:
                     "style": text_style_var.get(),
                     "char_spacing": char_spacing_var.get(),
                     "radius_offset": radius_offset_var.get(),
+                    "stroke_color": stroke_color_var.get(),
+                    "stroke_width": stroke_width_var.get(),
                 },
             )
 
@@ -1242,9 +1308,18 @@ class SytistDashboard:
             except (TypeError, ValueError):
                 outer_diameter = BUTTON_DEFAULT_DIAMETER
             outer_diameter = max(50, min(outer_diameter, min(BUTTON_CROP_SIZE)))
+            try:
+                cx_off = int(round(float(circle_offset_x_var.get())))
+                cy_off = int(round(float(circle_offset_y_var.get())))
+            except (TypeError, ValueError):
+                cx_off = cy_off = 0
+            max_dx = (crop_w - outer_diameter) // 2
+            max_dy = (crop_h - outer_diameter) // 2
+            cx_off = max(-max_dx, min(cx_off, max_dx))
+            cy_off = max(-max_dy, min(cy_off, max_dy))
             crop_preview_size = outer_diameter / preview_ratio
-            crop_preview_x = page_x + (crop_w - outer_diameter) / 2 / preview_ratio
-            crop_preview_y_dynamic = crop_preview_y + (crop_h - outer_diameter) / 2 / preview_ratio
+            crop_preview_x = page_x + ((crop_w - outer_diameter) / 2 + cx_off) / preview_ratio
+            crop_preview_y_dynamic = crop_preview_y + ((crop_h - outer_diameter) / 2 + cy_off) / preview_ratio
             canvas.create_oval(
                 crop_preview_x,
                 crop_preview_y_dynamic,
@@ -1283,6 +1358,10 @@ class SytistDashboard:
             print_finished_var,
             print_lime_rect_var,
             lime_rect_width_var,
+            circle_offset_x_var,
+            circle_offset_y_var,
+            edge_border_var,
+            print_params_var,
             text_var,
             position_var,
             facing_var,
@@ -1292,6 +1371,8 @@ class SytistDashboard:
             text_style_var,
             char_spacing_var,
             radius_offset_var,
+            stroke_color_var,
+            stroke_width_var,
         ]:
             var.trace_add("write", lambda *_: redraw())
 
@@ -1331,6 +1412,79 @@ class SytistDashboard:
             except Exception as exc:
                 messagebox.showerror("Save Error", f"Could not save button print:\n{exc}")
 
+        def save_template():
+            save_path = filedialog.asksaveasfilename(
+                title="Save Button Template",
+                defaultextension=".json",
+                initialfile="button_template.json",
+                filetypes=[("JSON Template", "*.json"), ("All Files", "*.*")],
+            )
+            if not save_path:
+                return
+            try:
+                template = {
+                    "outer_diameter": outer_diameter_var.get(),
+                    "finished_diameter": finished_diameter_var.get(),
+                    "print_finished_circle": print_finished_var.get(),
+                    "print_lime_calibration_rectangle": print_lime_rect_var.get(),
+                    "lime_rectangle_width": lime_rect_width_var.get(),
+                    "circle_offset_x": circle_offset_x_var.get(),
+                    "circle_offset_y": circle_offset_y_var.get(),
+                    "edge_border": edge_border_var.get(),
+                    "print_params": print_params_var.get(),
+                    "text": text_var.get(),
+                    "position": position_var.get(),
+                    "facing": facing_var.get(),
+                    "font": font_var.get(),
+                    "font_size": font_size_var.get(),
+                    "text_color": text_color_var.get(),
+                    "text_style": text_style_var.get(),
+                    "char_spacing": char_spacing_var.get(),
+                    "radius_offset": radius_offset_var.get(),
+                    "stroke_color": stroke_color_var.get(),
+                    "stroke_width": stroke_width_var.get(),
+                }
+                import json as _json
+                with open(save_path, "w", encoding="utf-8") as f:
+                    _json.dump(template, f, indent=4)
+                messagebox.showinfo("Saved", f"Template saved:\n{save_path}")
+            except Exception as exc:
+                messagebox.showerror("Save Error", f"Could not save template:\n{exc}")
+
+        def load_template():
+            load_path = filedialog.askopenfilename(
+                title="Load Button Template",
+                filetypes=[("JSON Template", "*.json"), ("All Files", "*.*")],
+            )
+            if not load_path:
+                return
+            try:
+                import json as _json
+                with open(load_path, "r", encoding="utf-8") as f:
+                    template = _json.load(f)
+                outer_diameter_var.set(str(template.get("outer_diameter", BUTTON_DEFAULT_DIAMETER)))
+                finished_diameter_var.set(str(template.get("finished_diameter", BUTTON_DEFAULT_FINISHED_DIAMETER)))
+                print_finished_var.set(bool(template.get("print_finished_circle", True)))
+                print_lime_rect_var.set(bool(template.get("print_lime_calibration_rectangle", False)))
+                lime_rect_width_var.set(str(template.get("lime_rectangle_width", BUTTON_PRINT_SIZE[0])))
+                circle_offset_x_var.set(str(template.get("circle_offset_x", "0")))
+                circle_offset_y_var.set(str(template.get("circle_offset_y", "0")))
+                edge_border_var.set(bool(template.get("edge_border", False)))
+                print_params_var.set(bool(template.get("print_params", False)))
+                text_var.set(str(template.get("text", "")))
+                position_var.set(str(template.get("position", "top")))
+                facing_var.set(str(template.get("facing", "outward")))
+                font_var.set(str(template.get("font", font_var.get())))
+                font_size_var.set(str(template.get("font_size", "72")))
+                text_color_var.set(str(template.get("text_color", "#000000")))
+                text_style_var.set(str(template.get("text_style", "Regular")))
+                char_spacing_var.set(str(template.get("char_spacing", "0")))
+                radius_offset_var.set(str(template.get("radius_offset", "0")))
+                stroke_color_var.set(str(template.get("stroke_color", "#000000")))
+                stroke_width_var.set(str(template.get("stroke_width", "0")))
+            except Exception as exc:
+                messagebox.showerror("Load Error", f"Could not load template:\n{exc}")
+
         def print_button_sheet():
             if not HAS_WIN32:
                 messagebox.showerror("Missing Library", "Please run: pip install pywin32")
@@ -1346,6 +1500,8 @@ class SytistDashboard:
 
         ttk.Button(button_row, text="Save 4x6 PNG", command=save_button_sheet).pack(side=tk.LEFT, padx=4)
         ttk.Button(button_row, text="Print", command=print_button_sheet).pack(side=tk.LEFT, padx=4)
+        ttk.Button(button_row, text="Save Template", command=save_template).pack(side=tk.LEFT, padx=4)
+        ttk.Button(button_row, text="Load Template", command=load_template).pack(side=tk.LEFT, padx=4)
         ttk.Button(button_row, text="Close", command=top.destroy).pack(side=tk.RIGHT, padx=4)
 
         redraw()

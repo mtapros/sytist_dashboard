@@ -495,6 +495,154 @@ class ButtonSheetTests(unittest.TestCase):
         self.assertEqual(result.getpixel((600, 300)), (0, 255, 0))
         self.assertEqual(result.getpixel((600, 0)), (255, 255, 255))
 
+    # --- circle_offset (D-pad) tests ---
+
+    def test_circle_offset_shifts_circle_right(self):
+        """A positive x offset moves the circle right; the right edge becomes blue."""
+        img = _make_image(1200, 1200, "blue")
+        # Use a smaller circle so there's white space on both sides by default.
+        # With diameter=800, circle occupies x=[200,999] (centered in 1200).
+        # With offset +200, circle occupies x=[400,1199]; right edge (x=1199) gains blue.
+        # Without offset, right edge pixel on sheet at x=1199, y=900 is outside the circle (white).
+        result_centered = self.service.render_button_sheet(img, circle_diameter=800)
+        result_offset = self.service.render_button_sheet(img, circle_diameter=800, circle_offset=(200, 0))
+
+        # With no offset, sheet pixel at x=1190 is outside the circle (white area).
+        self.assertEqual(result_centered.getpixel((1190, 900)), (255, 255, 255))
+        # With +200 offset, that same pixel is now inside the circle (blue).
+        self.assertEqual(result_offset.getpixel((1190, 900)), (0, 0, 255))
+
+    def test_circle_offset_zero_matches_default(self):
+        """Explicit (0, 0) offset produces same result as no offset."""
+        img = _make_image(1200, 1200, "green")
+        result_default = self.service.render_button_sheet(img)
+        result_zero = self.service.render_button_sheet(img, circle_offset=(0, 0))
+        diff = ImageChops.difference(result_default, result_zero)
+        self.assertIsNone(diff.getbbox())
+
+    def test_circle_offset_clamped_to_keep_circle_in_bounds(self):
+        """An extreme offset is clamped so the circle stays within the crop."""
+        img = _make_image(1200, 1200, "red")
+        # Offset larger than maximum should not crash and return a valid sheet.
+        result = self.service.render_button_sheet(img, circle_diameter=800, circle_offset=(9999, 9999))
+        self.assertEqual(result.size, BUTTON_PRINT_SIZE)
+
+    def test_red_circle_locked_to_main_circle_offset(self):
+        """The red finished circle shifts with the main circle offset."""
+        img = _make_image(1200, 1200, "white")
+        # With a large downward offset the red circle should appear in the lower half.
+        result = self.service.render_button_sheet(
+            img,
+            circle_diameter=1200,
+            finished_diameter=300,
+            print_finished_circle=True,
+            circle_offset=(0, 200),
+        )
+        # Top of the sheet center should be white (red circle has moved down).
+        top_pixel = result.getpixel((600, 320))
+        self.assertEqual(top_pixel, (255, 255, 255))
+
+    # --- edge_border tests ---
+
+    def test_edge_border_off_by_default(self):
+        """Without edge_border=True the yellow border is not drawn."""
+        img = _make_image(1200, 1200, "white")
+        result = self.service.render_button_sheet(img)
+        # The very center-top of the circle edge should be white (no yellow).
+        # BUTTON_CROP_SIZE 1200x1200 is centered at sheet y=300..1500.
+        # Circle edge top on sheet is at y=300; center x=600.
+        pixel = result.getpixel((600, 300))
+        self.assertEqual(pixel, (255, 255, 255))
+
+    def test_edge_border_draws_yellow_outline(self):
+        """edge_border=True produces a yellow pixel on the circle edge."""
+        img = _make_image(1200, 1200, "white")
+        result = self.service.render_button_sheet(img, edge_border=True)
+        # The very top of the circle (center x, top y on sheet) should contain yellow.
+        # Circle top on sheet is at y=300 (since (1800-1200)//2 = 300).
+        # We check a band of pixels near the top of the circle for any yellow.
+        found_yellow = False
+        for y in range(300, 310):
+            for x in range(595, 606):
+                r, g, b = result.getpixel((x, y))
+                if r > 200 and g > 200 and b < 50:
+                    found_yellow = True
+                    break
+        self.assertTrue(found_yellow, "Expected yellow border pixels near circle top edge")
+
+    # --- text stroke tests ---
+
+    def test_text_stroke_produces_different_result_than_no_stroke(self):
+        """Stroke config changes the rendered output."""
+        img = _make_image(1200, 1200, "white")
+        base = self.service.render_button_sheet(
+            img,
+            curved_text={
+                "text": "HI",
+                "position": "top",
+                "inward": False,
+                "font_family": "DejaVuSans.ttf",
+                "font_size": 72,
+                "color": "#000000",
+                "style": "Regular",
+                "char_spacing": 0,
+                "stroke_color": "",
+                "stroke_width": 0,
+            },
+        )
+        stroked = self.service.render_button_sheet(
+            img,
+            curved_text={
+                "text": "HI",
+                "position": "top",
+                "inward": False,
+                "font_family": "DejaVuSans.ttf",
+                "font_size": 72,
+                "color": "#000000",
+                "style": "Regular",
+                "char_spacing": 0,
+                "stroke_color": "#ff0000",
+                "stroke_width": 4,
+            },
+        )
+        diff = ImageChops.difference(base, stroked)
+        self.assertIsNotNone(diff.getbbox(), "Stroke should produce a different image")
+
+    def test_text_stroke_zero_width_matches_no_stroke(self):
+        """stroke_width=0 should produce the same result regardless of stroke_color."""
+        img = _make_image(1200, 1200, "white")
+        text_cfg_base = {
+            "text": "A",
+            "position": "top",
+            "inward": False,
+            "font_family": "DejaVuSans.ttf",
+            "font_size": 60,
+            "color": "#000000",
+            "style": "Regular",
+            "char_spacing": 0,
+            "stroke_width": 0,
+        }
+        text_cfg_with_color = dict(text_cfg_base, stroke_color="#ff0000")
+        result_base = self.service.render_button_sheet(img, curved_text=text_cfg_base)
+        result_color = self.service.render_button_sheet(img, curved_text=text_cfg_with_color)
+        diff = ImageChops.difference(result_base, result_color)
+        self.assertIsNone(diff.getbbox(), "stroke_width=0 should ignore stroke_color")
+
+    # --- print_params tests ---
+
+    def test_print_params_produces_non_blank_footer(self):
+        """print_params=True renders text in the bottom margin of the sheet."""
+        img = _make_image(1200, 1200, "white")
+        result_no_params = self.service.render_button_sheet(img)
+        result_params = self.service.render_button_sheet(img, print_params=True)
+        # The bottom margin area should differ when params are printed.
+        sheet_h = BUTTON_PRINT_SIZE[1]
+        crop_end = (sheet_h + BUTTON_CROP_SIZE[1]) // 2  # bottom of crop area
+        diff = ImageChops.difference(result_no_params, result_params)
+        bbox = diff.getbbox()
+        self.assertIsNotNone(bbox, "print_params should add content to the sheet")
+        self.assertGreaterEqual(bbox[1], crop_end - 5, "Params footer should be below the crop area")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -392,6 +392,16 @@ class PrintingService:
         except (TypeError, ValueError):
             radius_offset = 0
 
+        try:
+            stroke_width = max(0, int(round(float(text_config.get("stroke_width") or 0))))
+        except (TypeError, ValueError):
+            stroke_width = 0
+        stroke_fill = None
+        if stroke_width > 0 and text_config.get("stroke_color"):
+            stroke_fill = self._button_color(text_config.get("stroke_color"), "black")
+        else:
+            stroke_width = 0
+
         left, top, right, bottom = circle_bbox
         center = ((left + right) / 2, (top + bottom) / 2)
         radius = max(1, (right - left) / 2 - font_size / 2 - radius_offset)
@@ -440,11 +450,20 @@ class PrintingService:
             if inward:
                 rotation += 180
 
-            char_w = widths[idx] + 8
-            char_h = heights[idx] + 8
+            padding = 8 + stroke_width * 2
+            char_w = widths[idx] + padding
+            char_h = heights[idx] + padding
             char_img = Image.new("RGBA", (char_w, char_h), (255, 255, 255, 0))
             char_draw = ImageDraw.Draw(char_img)
-            char_draw.text((char_w / 2, char_h / 2), char, fill=fill, font=font, anchor="mm")
+            char_draw.text(
+                (char_w / 2, char_h / 2),
+                char,
+                fill=fill,
+                font=font,
+                anchor="mm",
+                stroke_fill=stroke_fill,
+                stroke_width=stroke_width,
+            )
             rotated = char_img.rotate(rotation, expand=True, resample=Image.Resampling.BICUBIC)
             img.paste(
                 rotated.convert("RGB"),
@@ -463,8 +482,22 @@ class PrintingService:
         curved_text=None,
         print_lime_calibration_rectangle=False,
         lime_rectangle_width=None,
+        circle_offset=None,
+        edge_border=False,
+        print_params=False,
     ):
-        """Render a circular button image centered on a 4x6 sheet."""
+        """Render a circular button image centered on a 4x6 sheet.
+
+        Args:
+            circle_offset: (dx, dy) tuple shifting the main circle from the
+                center of the crop area.  The finished/red circle is locked to
+                the same offset.  Values are clamped so the circle stays within
+                the crop.
+            edge_border: When True, draw a thin yellow border around the main
+                circle edge.
+            print_params: When True, render a small parameter summary in the
+                bottom margin of the 4x6 sheet.
+        """
         if not HAS_PIL:
             raise RuntimeError("Please run: pip install pillow")
 
@@ -492,14 +525,25 @@ class PrintingService:
         else:
             offset = (round(offset[0]), round(offset[1]))
 
+        # Resolve and clamp circle offset so the circle stays within the crop.
+        if circle_offset is None:
+            cx_off, cy_off = 0, 0
+        else:
+            cx_off = int(round(circle_offset[0]))
+            cy_off = int(round(circle_offset[1]))
+        max_dx = (crop_w - circle_diameter) // 2
+        max_dy = (crop_h - circle_diameter) // 2
+        cx_off = max(-max_dx, min(cx_off, max_dx))
+        cy_off = max(-max_dy, min(cy_off, max_dy))
+
         resized = source.resize(resized_size, Image.Resampling.LANCZOS)
         crop = Image.new("RGB", BUTTON_CROP_SIZE, "white")
         crop.paste(resized, offset)
 
         circle_mask = Image.new("L", BUTTON_CROP_SIZE, 0)
         draw = ImageDraw.Draw(circle_mask)
-        circle_left = (crop_w - circle_diameter) // 2
-        circle_top = (crop_h - circle_diameter) // 2
+        circle_left = (crop_w - circle_diameter) // 2 + cx_off
+        circle_top = (crop_h - circle_diameter) // 2 + cy_off
         circle_bbox = (
             circle_left,
             circle_top,
@@ -511,8 +555,8 @@ class PrintingService:
         circled.paste(crop, (0, 0), circle_mask)
         overlay = ImageDraw.Draw(circled)
         if print_finished_circle:
-            finished_left = (crop_w - finished_diameter) // 2
-            finished_top = (crop_h - finished_diameter) // 2
+            finished_left = (crop_w - finished_diameter) // 2 + cx_off
+            finished_top = (crop_h - finished_diameter) // 2 + cy_off
             overlay.ellipse(
                 (
                     finished_left,
@@ -523,13 +567,58 @@ class PrintingService:
                 outline="red",
                 width=max(2, round(circle_diameter / 300)),
             )
+        if edge_border:
+            border_width = max(1, round(circle_diameter / 200))
+            overlay.ellipse(
+                circle_bbox,
+                outline="yellow",
+                width=border_width,
+            )
         self._draw_curved_button_text(circled, curved_text, circle_bbox)
 
         sheet = Image.new("RGB", BUTTON_PRINT_SIZE, "white")
         sheet.paste(circled, ((sheet_w - crop_w) // 2, (sheet_h - crop_h) // 2))
         if print_lime_calibration_rectangle:
             self._draw_lime_calibration_rectangle(sheet, lime_rectangle_width)
+        if print_params:
+            text_cfg = curved_text or {}
+            params = {
+                "circle_diameter": circle_diameter,
+                "finished_diameter": finished_diameter,
+                "cx_off": cx_off,
+                "cy_off": cy_off,
+                "edge_border": edge_border,
+                "stroke_color": text_cfg.get("stroke_color") or "",
+                "stroke_width": text_cfg.get("stroke_width") or 0,
+                "scale": round(scale, 4),
+                "img_offset": offset,
+            }
+            self._draw_params_footer(sheet, params)
         return sheet
+
+    def _draw_params_footer(self, sheet, params):
+        """Render a small parameter summary in the bottom margin of the sheet."""
+        font = self._load_button_font(None, 28, "Regular")
+        sheet_w, sheet_h = sheet.size
+        lines = [
+            (
+                f"diam={params.get('circle_diameter','')}  "
+                f"fin_diam={params.get('finished_diameter','')}  "
+                f"circle_offset=({params.get('cx_off',0)}, {params.get('cy_off',0)})  "
+                f"edge_border={params.get('edge_border',False)}"
+            ),
+            (
+                f"stroke_color={params.get('stroke_color','')}  "
+                f"stroke_width={params.get('stroke_width',0)}  "
+                f"scale={params.get('scale','')}  "
+                f"img_offset={params.get('img_offset','')}"
+            ),
+        ]
+        draw = ImageDraw.Draw(sheet)
+        y = sheet_h - 80
+        for line in lines:
+            draw.text((20, y), line, fill="#444444", font=font)
+            y += 36
 
     def _center_crop_to_print_ratio(self, img, size_key):
         """Center-crop *img* to the target print aspect ratio for *size_key*.
