@@ -7,6 +7,7 @@ from printing_service import (
     ADDRESS_LABEL_SIZE,
     ADDRESS_LABEL_TEXT_WIDTH_RATIO,
     BUTTON_CROP_SIZE,
+    BUTTON_DEFAULT_DIAMETER,
     BUTTON_PRINT_SIZE,
     PRINT_ASPECT_RATIOS,
     PRODUCT_FOLDERS,
@@ -316,6 +317,7 @@ class ButtonSheetTests(unittest.TestCase):
 
         self.assertEqual(result.size, BUTTON_PRINT_SIZE)
         self.assertEqual(BUTTON_CROP_SIZE, (1200, 1200))
+        self.assertEqual(BUTTON_DEFAULT_DIAMETER, 1200)
         self.assertEqual(result.getpixel((600, 900)), (255, 0, 0))
         self.assertEqual(result.getpixel((0, 0)), (255, 255, 255))
         self.assertEqual(result.getpixel((0, 300)), (255, 255, 255))
@@ -341,6 +343,44 @@ class ButtonSheetTests(unittest.TestCase):
         result = self.service._prepare_image_for_job(job)
         self.assertEqual(result.mode, "RGB")
         self.assertEqual(result.size, (20, 20))
+
+    def test_render_button_sheet_allows_smaller_outer_diameter(self):
+        img = _make_image(1200, 1200, "blue")
+        result = self.service.render_button_sheet(img, circle_diameter=800)
+
+        self.assertEqual(result.getpixel((600, 900)), (0, 0, 255))
+        self.assertEqual(result.getpixel((200, 900)), (255, 255, 255))
+        self.assertEqual(result.getpixel((1000, 900)), (255, 255, 255))
+
+    def test_render_button_sheet_can_print_finished_red_circle(self):
+        img = _make_image(1200, 1200, "white")
+        result = self.service.render_button_sheet(
+            img,
+            finished_diameter=600,
+            print_finished_circle=True,
+        )
+
+        self.assertEqual(result.getpixel((600, 600)), (255, 0, 0))
+        self.assertEqual(result.getpixel((600, 900)), (255, 255, 255))
+
+    def test_render_button_sheet_can_add_curved_text(self):
+        img = _make_image(1200, 1200, "white")
+        result = self.service.render_button_sheet(
+            img,
+            curved_text={
+                "text": "BUTTON",
+                "position": "top",
+                "inward": False,
+                "font_family": "DejaVuSans.ttf",
+                "font_size": 72,
+                "color": "#000000",
+                "style": "Regular",
+                "char_spacing": 4,
+            },
+        )
+
+        diff = ImageChops.difference(result, Image.new("RGB", result.size, "white"))
+        self.assertIsNotNone(diff.getbbox())
 
 
 if __name__ == "__main__":

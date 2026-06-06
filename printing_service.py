@@ -1,14 +1,16 @@
 import io
+import math
 import os
 import re
 import urllib.request
 
 try:
-    from PIL import Image, ImageDraw, ImageFont, ImageOps, ImageWin
+    from PIL import Image, ImageColor, ImageDraw, ImageFont, ImageOps, ImageWin
     HAS_PIL = True
 except ImportError:
     HAS_PIL = False
     Image = None
+    ImageColor = None
     ImageDraw = None
     ImageFont = None
     ImageOps = None
@@ -56,6 +58,8 @@ ADDRESS_LABEL_FONT_MAX = 140
 ADDRESS_LABEL_FONT_MIN = 36
 BUTTON_PRINT_SIZE = (1200, 1800)
 BUTTON_CROP_SIZE = (1200, 1200)
+BUTTON_DEFAULT_DIAMETER = 1200
+BUTTON_DEFAULT_FINISHED_DIAMETER = 900
 
 
 class PrintingService:
@@ -299,14 +303,149 @@ class PrintingService:
             sheet.paste(tile, pos)
         return sheet
 
-    def render_button_sheet(self, img, scale=None, offset=None):
-        """Render a circular 4-inch button image centered on a 4x6 sheet."""
+    @staticmethod
+    def _clamp_button_diameter(value, default=BUTTON_DEFAULT_DIAMETER):
+        try:
+            diameter = int(round(float(value)))
+        except (TypeError, ValueError):
+            diameter = default
+        return max(50, min(diameter, min(BUTTON_CROP_SIZE)))
+
+    def _load_button_font(self, font_family, size, style="Regular"):
+        size = max(1, int(round(size or 1)))
+        style = (style or "Regular").lower()
+        family = (font_family or "").strip()
+        candidates = []
+        if family:
+            candidates.append(family)
+            base, ext = os.path.splitext(family)
+            if "bold" in style and "italic" in style:
+                candidates.extend([f"{base}-BoldOblique{ext}", f"{base}-BoldItalic{ext}", f"{base}bd{ext}"])
+            elif "bold" in style:
+                candidates.extend([f"{base}-Bold{ext}", f"{base}bd{ext}"])
+            elif "italic" in style:
+                candidates.extend([f"{base}-Oblique{ext}", f"{base}-Italic{ext}", f"{base}i{ext}"])
+        if "bold" in style and "italic" in style:
+            candidates.extend(["DejaVuSans-BoldOblique.ttf", "Arial Bold Italic.ttf", "arialbi.ttf"])
+        elif "bold" in style:
+            candidates.extend(["DejaVuSans-Bold.ttf", "Arial Bold.ttf", "arialbd.ttf"])
+        elif "italic" in style:
+            candidates.extend(["DejaVuSans-Oblique.ttf", "Arial Italic.ttf", "ariali.ttf"])
+        candidates.extend(["DejaVuSans.ttf", "Arial.ttf", "arial.ttf"])
+
+        for font_name in candidates:
+            try:
+                return ImageFont.truetype(font_name, size=size)
+            except (OSError, TypeError):
+                continue
+        return ImageFont.load_default()
+
+    @staticmethod
+    def _button_color(value, default="black"):
+        try:
+            ImageColor.getrgb(value or default)
+            return value or default
+        except (TypeError, ValueError):
+            return default
+
+    def _draw_curved_button_text(self, img, text_config, circle_bbox):
+        text = str((text_config or {}).get("text") or "")
+        if not text:
+            return
+
+        draw = ImageDraw.Draw(img)
+        font_size = max(1, int(round(float(text_config.get("font_size") or 48))))
+        font = self._load_button_font(
+            text_config.get("font_family"),
+            font_size,
+            text_config.get("style", "Regular"),
+        )
+        fill = self._button_color(text_config.get("color"), "black")
+        try:
+            spacing = float(text_config.get("char_spacing") or 0)
+        except (TypeError, ValueError):
+            spacing = 0
+        try:
+            radius_offset = float(text_config.get("radius_offset") or 0)
+        except (TypeError, ValueError):
+            radius_offset = 0
+
+        left, top, right, bottom = circle_bbox
+        center = ((left + right) / 2, (top + bottom) / 2)
+        radius = max(1, (right - left) / 2 - font_size / 2 - radius_offset)
+        position = str(text_config.get("position") or "top").lower()
+        anchor_degrees = {
+            "top": -90,
+            "12": -90,
+            "12 o'clock": -90,
+            "right": 0,
+            "3": 0,
+            "3 o'clock": 0,
+            "bottom": 90,
+            "6": 90,
+            "6 o'clock": 90,
+            "left": 180,
+            "9": 180,
+            "9 o'clock": 180,
+        }.get(position, -90)
+        inward = bool(text_config.get("inward"))
+
+        widths = []
+        heights = []
+        for char in text:
+            bbox = draw.textbbox((0, 0), char, font=font)
+            widths.append(max(1, bbox[2] - bbox[0]))
+            heights.append(max(1, bbox[3] - bbox[1]))
+        advances = [width + spacing for width in widths]
+        total_arc = max(0, sum(advances) - spacing)
+        cursor = -total_arc / 2
+
+        for idx, char in enumerate(text):
+            advance = advances[idx]
+            midpoint = cursor + advance / 2
+            angle = math.radians(anchor_degrees) + midpoint / radius
+            x = center[0] + math.cos(angle) * radius
+            y = center[1] + math.sin(angle) * radius
+            rotation = math.degrees(angle) + 90
+            if inward:
+                rotation += 180
+
+            char_w = widths[idx] + 8
+            char_h = heights[idx] + 8
+            char_img = Image.new("RGBA", (char_w, char_h), (255, 255, 255, 0))
+            char_draw = ImageDraw.Draw(char_img)
+            char_draw.text((char_w / 2, char_h / 2), char, fill=fill, font=font, anchor="mm")
+            rotated = char_img.rotate(rotation, expand=True, resample=Image.Resampling.BICUBIC)
+            img.paste(
+                rotated.convert("RGB"),
+                (round(x - rotated.width / 2), round(y - rotated.height / 2)),
+                rotated,
+            )
+            cursor += advance
+
+    def render_button_sheet(
+        self,
+        img,
+        scale=None,
+        offset=None,
+        circle_diameter=None,
+        finished_diameter=None,
+        print_finished_circle=False,
+        curved_text=None,
+    ):
+        """Render a circular button image centered on a 4x6 sheet."""
         if not HAS_PIL:
             raise RuntimeError("Please run: pip install pillow")
 
         source = img.convert("RGB") if img.mode != "RGB" else img
         crop_w, crop_h = BUTTON_CROP_SIZE
         sheet_w, sheet_h = BUTTON_PRINT_SIZE
+        circle_diameter = self._clamp_button_diameter(circle_diameter)
+        finished_diameter = self._clamp_button_diameter(
+            finished_diameter,
+            default=min(BUTTON_DEFAULT_FINISHED_DIAMETER, circle_diameter),
+        )
+        finished_diameter = min(finished_diameter, circle_diameter)
         if scale is None:
             scale = max(crop_w / source.width, crop_h / source.height)
         scale = max(float(scale), 0.01)
@@ -328,9 +467,32 @@ class PrintingService:
 
         circle_mask = Image.new("L", BUTTON_CROP_SIZE, 0)
         draw = ImageDraw.Draw(circle_mask)
-        draw.ellipse((0, 0, crop_w - 1, crop_h - 1), fill=255)
+        circle_left = (crop_w - circle_diameter) // 2
+        circle_top = (crop_h - circle_diameter) // 2
+        circle_bbox = (
+            circle_left,
+            circle_top,
+            circle_left + circle_diameter - 1,
+            circle_top + circle_diameter - 1,
+        )
+        draw.ellipse(circle_bbox, fill=255)
         circled = Image.new("RGB", BUTTON_CROP_SIZE, "white")
         circled.paste(crop, (0, 0), circle_mask)
+        overlay = ImageDraw.Draw(circled)
+        if print_finished_circle:
+            finished_left = (crop_w - finished_diameter) // 2
+            finished_top = (crop_h - finished_diameter) // 2
+            overlay.ellipse(
+                (
+                    finished_left,
+                    finished_top,
+                    finished_left + finished_diameter - 1,
+                    finished_top + finished_diameter - 1,
+                ),
+                outline="red",
+                width=max(2, round(circle_diameter / 300)),
+            )
+        self._draw_curved_button_text(circled, curved_text, circle_bbox)
 
         sheet = Image.new("RGB", BUTTON_PRINT_SIZE, "white")
         sheet.paste(circled, ((sheet_w - crop_w) // 2, (sheet_h - crop_h) // 2))
