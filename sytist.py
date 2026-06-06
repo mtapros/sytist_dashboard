@@ -18,7 +18,7 @@ from data_loader import HAS_MYSQL, SytistDataLoader
 from dialogs import Dialogs
 from export_service import ExportService, _safe_qty
 from models import CartItem, Order, PackageDetails, PhotoPath, PrintJob, ShippingAddress
-from printing_service import HAS_PIL, HAS_WIN32, PrintingService
+from printing_service import BUTTON_CROP_SIZE, BUTTON_PRINT_SIZE, HAS_PIL, HAS_WIN32, PrintingService
 from usps_service import USPSNotConfiguredError, USPSService, USPSServiceError
 from zoho_books import ZohoBooksClient, ZohoBooksError
 
@@ -302,6 +302,7 @@ class SytistDashboard:
         ttk.Button(row1, text="Printer Routing", command=self.configure_printer_routing).pack(side=tk.LEFT, padx=5)
         ttk.Button(row1, text="Print Selected Orders", command=self.print_selected_orders).pack(side=tk.LEFT, padx=5)
         ttk.Button(row1, text="Print Image Files", command=self.print_image_files).pack(side=tk.LEFT, padx=5)
+        ttk.Button(row1, text="Create Button Print", command=self.open_button_print_editor).pack(side=tk.LEFT, padx=5)
         ttk.Button(row1, text="Print 4x6 Address", command=self.open_address_print_dialog).pack(side=tk.LEFT, padx=5)
 
         ttk.Separator(row1, orient=tk.VERTICAL).pack(side=tk.LEFT, padx=15, fill=tk.Y)
@@ -1065,6 +1066,174 @@ class SytistDashboard:
 
         jobs = self.build_file_print_jobs(filepaths, chosen_type)
         self.start_print_workflow(jobs, "Image File Print")
+
+    def open_button_print_editor(self):
+        if not HAS_PIL or Image is None or ImageTk is None:
+            messagebox.showerror("Missing Library", "Please run 'pip install pillow' to create button prints.")
+            return
+
+        filepath = filedialog.askopenfilename(
+            title="Select Button Image",
+            filetypes=[
+                ("Image Files", "*.jpg *.jpeg *.png *.tif *.tiff *.bmp"),
+                ("All Files", "*.*"),
+            ],
+        )
+        if not filepath:
+            return
+
+        try:
+            source_img = Image.open(filepath).convert("RGB")
+        except Exception as exc:
+            messagebox.showerror("Image Error", f"Could not open image:\n{exc}")
+            return
+
+        top = tk.Toplevel(self.root)
+        top.title("Create Button Print")
+        top.geometry("560x760")
+        top.transient(self.root)
+
+        state = {
+            "source": source_img,
+            "image_name": os.path.basename(filepath),
+            "drag_start": None,
+            "photo": None,
+            "offset": [0, 0],
+        }
+        crop_w, crop_h = BUTTON_CROP_SIZE
+        sheet_w, sheet_h = BUTTON_PRINT_SIZE
+        initial_scale = max(crop_w / source_img.width, crop_h / source_img.height)
+        state["scale"] = initial_scale
+        resized_w = round(source_img.width * initial_scale)
+        resized_h = round(source_img.height * initial_scale)
+        state["offset"] = [
+            round((crop_w - resized_w) / 2),
+            round((crop_h - resized_h) / 2),
+        ]
+
+        ttk.Label(
+            top,
+            text="Drag the image inside the 4-inch circle. Save creates a 4x6 PNG with a circular crop.",
+            wraplength=500,
+            justify=tk.CENTER,
+        ).pack(pady=(12, 6))
+
+        canvas_w, canvas_h = 420, 620
+        page_x, page_y = 10, 10
+        preview_w, preview_h = 400, 600
+        preview_ratio = sheet_w / preview_w
+        crop_preview_y = page_y + ((sheet_h - crop_h) // 2) / preview_ratio
+        crop_preview_size = crop_w / preview_ratio
+
+        canvas = tk.Canvas(top, width=canvas_w, height=canvas_h, background="#d9d9d9", highlightthickness=0)
+        canvas.pack(padx=12, pady=8)
+
+        zoom_var = tk.DoubleVar(value=100)
+        zoom_label = ttk.Label(top, text="Zoom: 100%")
+        zoom_label.pack()
+
+        def render_current_sheet():
+            return self.printing_service.render_button_sheet(
+                state["source"],
+                scale=state["scale"],
+                offset=state["offset"],
+            )
+
+        def redraw():
+            sheet = render_current_sheet()
+            preview = sheet.resize((preview_w, preview_h), Image.Resampling.LANCZOS)
+            photo = ImageTk.PhotoImage(preview)
+            state["photo"] = photo
+            canvas.delete("all")
+            canvas.create_rectangle(page_x - 1, page_y - 1, page_x + preview_w + 1, page_y + preview_h + 1, outline="#888")
+            canvas.create_image(page_x, page_y, anchor=tk.NW, image=photo)
+            canvas.create_oval(
+                page_x,
+                crop_preview_y,
+                page_x + crop_preview_size,
+                crop_preview_y + crop_preview_size,
+                outline="#111",
+                width=2,
+            )
+
+        def set_zoom(value):
+            pct = float(value)
+            old_resized = (
+                source_img.width * state["scale"],
+                source_img.height * state["scale"],
+            )
+            center = (
+                state["offset"][0] + old_resized[0] / 2,
+                state["offset"][1] + old_resized[1] / 2,
+            )
+            state["scale"] = initial_scale * pct / 100
+            new_resized = (
+                source_img.width * state["scale"],
+                source_img.height * state["scale"],
+            )
+            state["offset"] = [
+                round(center[0] - new_resized[0] / 2),
+                round(center[1] - new_resized[1] / 2),
+            ]
+            zoom_label.config(text=f"Zoom: {pct:.0f}%")
+            redraw()
+
+        ttk.Scale(top, from_=50, to=250, orient=tk.HORIZONTAL, variable=zoom_var, command=set_zoom).pack(fill=tk.X, padx=45)
+
+        def on_drag_start(event):
+            state["drag_start"] = (event.x, event.y)
+
+        def on_drag(event):
+            if not state["drag_start"]:
+                return
+            last_x, last_y = state["drag_start"]
+            dx = round((event.x - last_x) * preview_ratio)
+            dy = round((event.y - last_y) * preview_ratio)
+            state["offset"][0] += dx
+            state["offset"][1] += dy
+            state["drag_start"] = (event.x, event.y)
+            redraw()
+
+        canvas.bind("<ButtonPress-1>", on_drag_start)
+        canvas.bind("<B1-Motion>", on_drag)
+
+        button_row = ttk.Frame(top)
+        button_row.pack(fill=tk.X, padx=18, pady=12)
+
+        def save_button_sheet():
+            default_name = f"{os.path.splitext(state['image_name'])[0]}_button_4x6.png"
+            save_path = filedialog.asksaveasfilename(
+                title="Save Button 4x6 PNG",
+                defaultextension=".png",
+                initialfile=default_name,
+                filetypes=[("PNG Image", "*.png"), ("All Files", "*.*")],
+            )
+            if not save_path:
+                return
+            try:
+                render_current_sheet().save(save_path, format="PNG")
+                messagebox.showinfo("Saved", f"Button print saved:\n{save_path}")
+            except Exception as exc:
+                messagebox.showerror("Save Error", f"Could not save button print:\n{exc}")
+
+        def print_button_sheet():
+            if not HAS_WIN32:
+                messagebox.showerror("Missing Library", "Please run: pip install pywin32")
+                return
+            job = PrintJob(
+                source_type="pil",
+                source=render_current_sheet(),
+                display_name=f"Button - {state['image_name']}",
+                product="Button",
+                size_key="button",
+            )
+            self.start_print_workflow([job], "Button Print")
+
+        ttk.Button(button_row, text="Save 4x6 PNG", command=save_button_sheet).pack(side=tk.LEFT, padx=4)
+        ttk.Button(button_row, text="Print", command=print_button_sheet).pack(side=tk.LEFT, padx=4)
+        ttk.Button(button_row, text="Close", command=top.destroy).pack(side=tk.RIGHT, padx=4)
+
+        redraw()
 
     def get_address_prefill_order(self):
         selected_rows = self.tree_orders.selection()
