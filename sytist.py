@@ -10,7 +10,8 @@ import urllib.parse
 import urllib.request
 import webbrowser
 from decimal import Decimal, InvalidOperation
-from tkinter import filedialog, messagebox, simpledialog, ttk
+from tkinter import colorchooser, filedialog, messagebox, simpledialog, ttk
+import tkinter.font as tkfont
 
 from config_store import ConfigStore
 from dashboard_state import DashboardStateStore
@@ -18,7 +19,15 @@ from data_loader import HAS_MYSQL, SytistDataLoader
 from dialogs import Dialogs
 from export_service import ExportService, _safe_qty
 from models import CartItem, Order, PackageDetails, PhotoPath, PrintJob, ShippingAddress
-from printing_service import BUTTON_CROP_SIZE, BUTTON_PRINT_SIZE, HAS_PIL, HAS_WIN32, PrintingService
+from printing_service import (
+    BUTTON_CROP_SIZE,
+    BUTTON_DEFAULT_DIAMETER,
+    BUTTON_DEFAULT_FINISHED_DIAMETER,
+    BUTTON_PRINT_SIZE,
+    HAS_PIL,
+    HAS_WIN32,
+    PrintingService,
+)
 from usps_service import USPSNotConfiguredError, USPSService, USPSServiceError
 from zoho_books import ZohoBooksClient, ZohoBooksError
 
@@ -1090,7 +1099,7 @@ class SytistDashboard:
 
         top = tk.Toplevel(self.root)
         top.title("Create Button Print")
-        top.geometry("560x760")
+        top.geometry("980x820")
         top.transient(self.root)
 
         state = {
@@ -1113,30 +1122,104 @@ class SytistDashboard:
 
         ttk.Label(
             top,
-            text="Drag the image inside the 4-inch circle. Save creates a 4x6 PNG with a circular crop.",
-            wraplength=500,
+            text="Drag the image inside the button circle. Adjust the template, finished button guide, and curved text before saving or printing.",
+            wraplength=900,
             justify=tk.CENTER,
         ).pack(pady=(12, 6))
+
+        editor_frame = ttk.Frame(top)
+        editor_frame.pack(fill=tk.BOTH, expand=True, padx=12, pady=8)
 
         canvas_w, canvas_h = 420, 620
         page_x, page_y = 10, 10
         preview_w, preview_h = 400, 600
         preview_ratio = sheet_w / preview_w
         crop_preview_y = page_y + ((sheet_h - crop_h) // 2) / preview_ratio
-        crop_preview_size = crop_w / preview_ratio
 
-        canvas = tk.Canvas(top, width=canvas_w, height=canvas_h, background="#d9d9d9", highlightthickness=0)
-        canvas.pack(padx=12, pady=8)
+        canvas = tk.Canvas(editor_frame, width=canvas_w, height=canvas_h, background="#d9d9d9", highlightthickness=0)
+        canvas.pack(side=tk.LEFT, padx=(0, 14), pady=0)
+
+        controls = ttk.Frame(editor_frame)
+        controls.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
         zoom_var = tk.DoubleVar(value=100)
-        zoom_label = ttk.Label(top, text="Zoom: 100%")
-        zoom_label.pack()
+        zoom_label = ttk.Label(controls, text="Zoom: 100%")
+        zoom_label.pack(anchor="w")
+
+        ttk.Scale(controls, from_=50, to=250, orient=tk.HORIZONTAL, variable=zoom_var).pack(fill=tk.X, pady=(0, 10))
+
+        outer_diameter_var = tk.StringVar(value=str(BUTTON_DEFAULT_DIAMETER))
+        finished_diameter_var = tk.StringVar(value=str(BUTTON_DEFAULT_FINISHED_DIAMETER))
+        print_finished_var = tk.BooleanVar(value=True)
+        text_var = tk.StringVar()
+        position_var = tk.StringVar(value="top")
+        facing_var = tk.StringVar(value="outward")
+        font_size_var = tk.StringVar(value="72")
+        text_color_var = tk.StringVar(value="#000000")
+        text_style_var = tk.StringVar(value="Regular")
+        char_spacing_var = tk.StringVar(value="0")
+        radius_offset_var = tk.StringVar(value="0")
+        try:
+            font_values = sorted(tkfont.families(root=top))
+        except Exception:
+            font_values = []
+        font_var = tk.StringVar(value=("Arial" if "Arial" in font_values else "DejaVuSans.ttf"))
+
+        def choose_text_color():
+            _, color = colorchooser.askcolor(color=text_color_var.get() or "#000000", parent=top)
+            if color:
+                text_color_var.set(color)
+
+        template_frame = ttk.LabelFrame(controls, text="Template circles", padding=8)
+        template_frame.pack(fill=tk.X, pady=(0, 10))
+        ttk.Label(template_frame, text="Outer circle diameter (px):").grid(row=0, column=0, sticky="w", pady=3)
+        ttk.Spinbox(template_frame, from_=50, to=min(BUTTON_CROP_SIZE), increment=1, textvariable=outer_diameter_var, width=10).grid(row=0, column=1, sticky="w", padx=6, pady=3)
+        ttk.Label(template_frame, text="Finished red circle diameter (px):").grid(row=1, column=0, sticky="w", pady=3)
+        ttk.Spinbox(template_frame, from_=50, to=min(BUTTON_CROP_SIZE), increment=1, textvariable=finished_diameter_var, width=10).grid(row=1, column=1, sticky="w", padx=6, pady=3)
+        ttk.Checkbutton(template_frame, text="Print red finished-button circle", variable=print_finished_var).grid(row=2, column=0, columnspan=2, sticky="w", pady=3)
+
+        text_frame = ttk.LabelFrame(controls, text="Curved text", padding=8)
+        text_frame.pack(fill=tk.X)
+        ttk.Label(text_frame, text="Text:").grid(row=0, column=0, sticky="w", pady=3)
+        ttk.Entry(text_frame, textvariable=text_var, width=35).grid(row=0, column=1, columnspan=3, sticky="ew", padx=6, pady=3)
+        ttk.Label(text_frame, text="Position:").grid(row=1, column=0, sticky="w", pady=3)
+        ttk.Combobox(text_frame, textvariable=position_var, values=["top", "right", "bottom", "left"], state="readonly", width=12).grid(row=1, column=1, sticky="w", padx=6, pady=3)
+        ttk.Label(text_frame, text="Facing:").grid(row=1, column=2, sticky="w", pady=3)
+        ttk.Combobox(text_frame, textvariable=facing_var, values=["outward", "inward"], state="readonly", width=12).grid(row=1, column=3, sticky="w", padx=6, pady=3)
+        ttk.Label(text_frame, text="Font:").grid(row=2, column=0, sticky="w", pady=3)
+        ttk.Combobox(text_frame, textvariable=font_var, values=font_values, width=30).grid(row=2, column=1, columnspan=3, sticky="ew", padx=6, pady=3)
+        ttk.Label(text_frame, text="Size:").grid(row=3, column=0, sticky="w", pady=3)
+        ttk.Spinbox(text_frame, from_=6, to=240, increment=1, textvariable=font_size_var, width=8).grid(row=3, column=1, sticky="w", padx=6, pady=3)
+        ttk.Label(text_frame, text="Color:").grid(row=3, column=2, sticky="w", pady=3)
+        ttk.Entry(text_frame, textvariable=text_color_var, width=12).grid(row=3, column=3, sticky="w", padx=6, pady=3)
+        ttk.Button(text_frame, text="Choose", command=choose_text_color).grid(row=3, column=4, sticky="w", pady=3)
+        ttk.Label(text_frame, text="Style:").grid(row=4, column=0, sticky="w", pady=3)
+        ttk.Combobox(text_frame, textvariable=text_style_var, values=["Regular", "Bold", "Italic", "Bold Italic"], state="readonly", width=12).grid(row=4, column=1, sticky="w", padx=6, pady=3)
+        ttk.Label(text_frame, text="Character spacing:").grid(row=4, column=2, sticky="w", pady=3)
+        ttk.Spinbox(text_frame, from_=-20, to=80, increment=1, textvariable=char_spacing_var, width=8).grid(row=4, column=3, sticky="w", padx=6, pady=3)
+        ttk.Label(text_frame, text="Text inset from edge:").grid(row=5, column=0, sticky="w", pady=3)
+        ttk.Spinbox(text_frame, from_=-100, to=400, increment=1, textvariable=radius_offset_var, width=8).grid(row=5, column=1, sticky="w", padx=6, pady=3)
+        text_frame.columnconfigure(1, weight=1)
 
         def render_current_sheet():
             return self.printing_service.render_button_sheet(
                 state["source"],
                 scale=state["scale"],
                 offset=state["offset"],
+                circle_diameter=outer_diameter_var.get(),
+                finished_diameter=finished_diameter_var.get(),
+                print_finished_circle=print_finished_var.get(),
+                curved_text={
+                    "text": text_var.get(),
+                    "position": position_var.get(),
+                    "inward": facing_var.get() == "inward",
+                    "font_family": font_var.get(),
+                    "font_size": font_size_var.get(),
+                    "color": text_color_var.get(),
+                    "style": text_style_var.get(),
+                    "char_spacing": char_spacing_var.get(),
+                    "radius_offset": radius_offset_var.get(),
+                },
             )
 
         def redraw():
@@ -1147,11 +1230,19 @@ class SytistDashboard:
             canvas.delete("all")
             canvas.create_rectangle(page_x - 1, page_y - 1, page_x + preview_w + 1, page_y + preview_h + 1, outline="#888")
             canvas.create_image(page_x, page_y, anchor=tk.NW, image=photo)
+            try:
+                outer_diameter = int(round(float(outer_diameter_var.get())))
+            except (TypeError, ValueError):
+                outer_diameter = BUTTON_DEFAULT_DIAMETER
+            outer_diameter = max(50, min(outer_diameter, min(BUTTON_CROP_SIZE)))
+            crop_preview_size = outer_diameter / preview_ratio
+            crop_preview_x = page_x + (crop_w - outer_diameter) / 2 / preview_ratio
+            crop_preview_y_dynamic = crop_preview_y + (crop_h - outer_diameter) / 2 / preview_ratio
             canvas.create_oval(
-                page_x,
-                crop_preview_y,
-                page_x + crop_preview_size,
-                crop_preview_y + crop_preview_size,
+                crop_preview_x,
+                crop_preview_y_dynamic,
+                crop_preview_x + crop_preview_size,
+                crop_preview_y_dynamic + crop_preview_size,
                 outline="#111",
                 width=2,
             )
@@ -1178,7 +1269,22 @@ class SytistDashboard:
             zoom_label.config(text=f"Zoom: {pct:.0f}%")
             redraw()
 
-        ttk.Scale(top, from_=50, to=250, orient=tk.HORIZONTAL, variable=zoom_var, command=set_zoom).pack(fill=tk.X, padx=45)
+        zoom_var.trace_add("write", lambda *_: set_zoom(zoom_var.get()))
+        for var in [
+            outer_diameter_var,
+            finished_diameter_var,
+            print_finished_var,
+            text_var,
+            position_var,
+            facing_var,
+            font_var,
+            font_size_var,
+            text_color_var,
+            text_style_var,
+            char_spacing_var,
+            radius_offset_var,
+        ]:
+            var.trace_add("write", lambda *_: redraw())
 
         def on_drag_start(event):
             state["drag_start"] = (event.x, event.y)
