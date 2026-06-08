@@ -482,6 +482,8 @@ class ExpenseReceiptDialog:
         self.receipt_canvas: tk.Canvas | None = None
         self.receipt_scroll_y: ttk.Scrollbar | None = None
         self.receipt_scroll_x: ttk.Scrollbar | None = None
+        self.expense_scroll_canvas: tk.Canvas | None = None
+        self.expense_scroll_window: int | None = None
         self.receipt_photo = None
         self.receipt_preview_image = None
 
@@ -491,8 +493,27 @@ class ExpenseReceiptDialog:
         top.geometry("1240x880")
         top.transient(self.parent)
 
-        outer = ttk.Frame(top, padding=12)
-        outer.pack(fill=tk.BOTH, expand=True)
+        scroll_canvas = tk.Canvas(top, highlightthickness=0)
+        scroll_y = ttk.Scrollbar(top, orient=tk.VERTICAL, command=scroll_canvas.yview)
+        scroll_x = ttk.Scrollbar(top, orient=tk.HORIZONTAL, command=scroll_canvas.xview)
+        scroll_canvas.configure(yscrollcommand=scroll_y.set, xscrollcommand=scroll_x.set)
+        scroll_canvas.grid(row=0, column=0, sticky="nsew")
+        scroll_y.grid(row=0, column=1, sticky="ns")
+        scroll_x.grid(row=1, column=0, sticky="ew")
+        top.rowconfigure(0, weight=1)
+        top.columnconfigure(0, weight=1)
+
+        outer = ttk.Frame(scroll_canvas, padding=12)
+        self.expense_scroll_canvas = scroll_canvas
+        self.expense_scroll_window = scroll_canvas.create_window((0, 0), window=outer, anchor=tk.NW)
+        outer.bind("<Configure>", self.update_expense_scroll_region)
+        scroll_canvas.bind("<Configure>", self.resize_expense_scroll_window)
+        top.bind("<MouseWheel>", self.scroll_expense_window_mousewheel)
+        top.bind("<Shift-MouseWheel>", self.scroll_expense_window_mousewheel)
+        top.bind("<Button-4>", self.scroll_expense_window_button_wheel)
+        top.bind("<Button-5>", self.scroll_expense_window_button_wheel)
+        top.bind("<Shift-Button-4>", self.scroll_expense_window_button_wheel)
+        top.bind("<Shift-Button-5>", self.scroll_expense_window_button_wheel)
 
         ttk.Label(
             outer,
@@ -623,27 +644,45 @@ class ExpenseReceiptDialog:
     def use_lm_studio_default(self) -> None:
         self.endpoint_var.set(DEFAULT_LM_STUDIO_ENDPOINT)
 
+    def update_expense_scroll_region(self, _event=None) -> None:
+        if not self.expense_scroll_canvas:
+            return
+        self.expense_scroll_canvas.configure(scrollregion=self.expense_scroll_canvas.bbox("all"))
+
+    def resize_expense_scroll_window(self, event) -> None:
+        if not self.expense_scroll_canvas or self.expense_scroll_window is None:
+            return
+        requested_width = self.expense_scroll_canvas.nametowidget(
+            self.expense_scroll_canvas.itemcget(self.expense_scroll_window, "window")
+        ).winfo_reqwidth()
+        self.expense_scroll_canvas.itemconfigure(self.expense_scroll_window, width=max(event.width, requested_width))
+
+    def scroll_expense_window_mousewheel(self, event) -> str:
+        units = mousewheel_delta_to_scroll_units(int(getattr(event, "delta", 0) or 0))
+        return self.scroll_expense_window(units, horizontal=bool(getattr(event, "state", 0) & 0x0001))
+
+    def scroll_expense_window_button_wheel(self, event) -> str:
+        units = mousewheel_button_to_scroll_units(int(getattr(event, "num", 0) or 0))
+        return self.scroll_expense_window(units, horizontal=bool(getattr(event, "state", 0) & 0x0001))
+
+    def scroll_expense_window(self, units: int, horizontal: bool = False) -> str:
+        if not self.expense_scroll_canvas or units == 0:
+            return "break"
+        if horizontal:
+            self.expense_scroll_canvas.xview_scroll(units, "units")
+        else:
+            self.expense_scroll_canvas.yview_scroll(units, "units")
+        return "break"
+
     def bind_receipt_canvas_scroll(self) -> None:
         if not self.receipt_canvas:
             return
-        self.receipt_canvas.bind("<Enter>", self.enable_receipt_mousewheel)
-        self.receipt_canvas.bind("<Leave>", self.disable_receipt_mousewheel)
+        self.receipt_canvas.bind("<MouseWheel>", self.scroll_receipt_mousewheel)
+        self.receipt_canvas.bind("<Shift-MouseWheel>", self.scroll_receipt_mousewheel)
         self.receipt_canvas.bind("<Button-4>", self.scroll_receipt_button_wheel)
         self.receipt_canvas.bind("<Button-5>", self.scroll_receipt_button_wheel)
         self.receipt_canvas.bind("<Shift-Button-4>", self.scroll_receipt_button_wheel)
         self.receipt_canvas.bind("<Shift-Button-5>", self.scroll_receipt_button_wheel)
-
-    def enable_receipt_mousewheel(self, _event=None) -> None:
-        if not self.receipt_canvas:
-            return
-        self.receipt_canvas.bind_all("<MouseWheel>", self.scroll_receipt_mousewheel)
-        self.receipt_canvas.bind_all("<Shift-MouseWheel>", self.scroll_receipt_mousewheel)
-
-    def disable_receipt_mousewheel(self, _event=None) -> None:
-        if not self.receipt_canvas:
-            return
-        self.receipt_canvas.unbind_all("<MouseWheel>")
-        self.receipt_canvas.unbind_all("<Shift-MouseWheel>")
 
     def scroll_receipt_mousewheel(self, event) -> str:
         units = mousewheel_delta_to_scroll_units(int(getattr(event, "delta", 0) or 0))

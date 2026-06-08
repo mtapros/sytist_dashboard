@@ -5,6 +5,7 @@ import unittest
 
 from expense_module import (
     ExpenseFieldSpec,
+    ExpenseReceiptDialog,
     ExpenseVLClient,
     format_review_value,
     mousewheel_button_to_scroll_units,
@@ -49,6 +50,26 @@ class ExpenseModuleTests(unittest.TestCase):
         self.assertEqual(mousewheel_button_to_scroll_units(4), -1)
         self.assertEqual(mousewheel_button_to_scroll_units(5), 1)
         self.assertEqual(mousewheel_button_to_scroll_units(1), 0)
+
+    def test_expense_window_scrolls_outer_canvas(self):
+        class FakeCanvas:
+            def __init__(self):
+                self.calls = []
+
+            def yview_scroll(self, units, unit_type):
+                self.calls.append(("y", units, unit_type))
+
+            def xview_scroll(self, units, unit_type):
+                self.calls.append(("x", units, unit_type))
+
+        dialog = object.__new__(ExpenseReceiptDialog)
+        dialog.expense_scroll_canvas = FakeCanvas()
+
+        self.assertEqual(dialog.scroll_expense_window(3), "break")
+        self.assertEqual(dialog.expense_scroll_canvas.calls, [("y", 3, "units")])
+
+        self.assertEqual(dialog.scroll_expense_window(-2, horizontal=True), "break")
+        self.assertEqual(dialog.expense_scroll_canvas.calls[-1], ("x", -2, "units"))
 
 
 if __name__ == "__main__":
