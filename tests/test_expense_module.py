@@ -3,7 +3,13 @@ import os
 import tempfile
 import unittest
 
-from expense_module import ExpenseFieldSpec, ExpenseVLClient, format_review_value
+from expense_module import (
+    ExpenseFieldSpec,
+    ExpenseVLClient,
+    format_review_value,
+    mousewheel_button_to_scroll_units,
+    mousewheel_delta_to_scroll_units,
+)
 
 
 class ExpenseModuleTests(unittest.TestCase):
@@ -31,6 +37,18 @@ class ExpenseModuleTests(unittest.TestCase):
 
     def test_blank_edited_review_value_is_shown_as_not_found(self):
         self.assertEqual(format_review_value("   "), "Not found")
+
+    def test_mousewheel_delta_converts_to_scroll_units(self):
+        self.assertEqual(mousewheel_delta_to_scroll_units(120), -1)
+        self.assertEqual(mousewheel_delta_to_scroll_units(-120), 1)
+        self.assertEqual(mousewheel_delta_to_scroll_units(240), -2)
+        self.assertEqual(mousewheel_delta_to_scroll_units(1), -1)
+        self.assertEqual(mousewheel_delta_to_scroll_units(0), 0)
+
+    def test_linux_mousewheel_buttons_convert_to_scroll_units(self):
+        self.assertEqual(mousewheel_button_to_scroll_units(4), -1)
+        self.assertEqual(mousewheel_button_to_scroll_units(5), 1)
+        self.assertEqual(mousewheel_button_to_scroll_units(1), 0)
 
 
 if __name__ == "__main__":
