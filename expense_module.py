@@ -556,8 +556,9 @@ class ExpenseReceiptDialog:
             models = self._client_from_settings(timeout_override=10).list_models()
             self.parent.after(0, lambda: self.show_model_picker(models))
         except Exception as exc:
-            self.parent.after(0, lambda: messagebox.showerror("Model List Error", str(exc)))
-            self.parent.after(0, lambda: self.write_result(f"Error fetching models: {exc}\n"))
+            error_message = str(exc)
+            self.parent.after(0, lambda msg=error_message: messagebox.showerror("Model List Error", msg))
+            self.parent.after(0, lambda msg=error_message: self.write_result(f"Error fetching models: {msg}\n"))
         finally:
             if self.model_button:
                 self.parent.after(0, lambda: self.model_button.configure(state="normal"))
@@ -643,7 +644,8 @@ class ExpenseReceiptDialog:
             self.last_result = result
             self.parent.after(0, lambda: self.write_result(result.to_json()))
         except Exception as exc:
-            self.parent.after(0, lambda: self.write_result(f"Error: {exc}\n"))
+            error_message = str(exc)
+            self.parent.after(0, lambda msg=error_message: self.write_result(f"Error: {msg}\n"))
         finally:
             if self.analyze_button:
                 self.parent.after(0, lambda: self.analyze_button.configure(state="normal"))
