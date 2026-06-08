@@ -1,13 +1,14 @@
 """Receipt expense extraction module.
 
-This module provides a small Tkinter UI and a provider-agnostic client for
-sending a JPG/JPEG receipt image to a vision-language (VL/VLM) endpoint and
-asking it to return structured expense information.
+This module provides a Tkinter UI for loading a JPG/JPEG store receipt,
+sending it to an LM Studio vision-language model, and reviewing the returned
+expense fields for approval.
 
 The default endpoint targets LM Studio on the local network at
 ``192.168.34.82:1234`` using LM Studio's OpenAI-compatible API. The dialog can
-also fetch the currently available LM Studio models and displays the selected
-receipt image before analysis.
+fetch available LM Studio models, display the selected receipt image, show the
+extracted data in a clean review table, and mark the extraction approved or in
+need of correction.
 """
 
 from __future__ import annotations
@@ -51,6 +52,21 @@ DEFAULT_EXPENSE_FIELDS: list[dict[str, str]] = [
     {"name": "expense_category", "description": "Best-fit category such as Meals, Supplies, Travel, Fuel, or Office."},
 ]
 
+IMPORTANT_FIELD_ORDER = [
+    "merchant_name",
+    "receipt_date",
+    "receipt_time",
+    "subtotal",
+    "tax",
+    "tip",
+    "total",
+    "payment_method",
+    "expense_category",
+    "items",
+    "confidence",
+    "notes",
+]
+
 
 @dataclass
 class ExpenseFieldSpec:
@@ -72,6 +88,8 @@ class ExpenseExtractionResult:
     fields: dict[str, Any]
     raw_response: dict[str, Any]
     extracted_at: str
+    approval_status: str = "Pending Review"
+    approved_at: str = ""
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), indent=2, ensure_ascii=False, default=str)
@@ -218,7 +236,9 @@ class ExpenseVLClient:
         return {
             "model": self.model,
             "temperature": 0,
-            "response_format": {"type": "json_object"},
+            # LM Studio currently accepts json_schema or text here. Use text and
+            # rely on the prompt/parser for strict JSON extraction.
+            "response_format": {"type": "text"},
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {
@@ -331,8 +351,9 @@ def coerce_requested_fields(fields: dict[str, Any], specs: list[ExpenseFieldSpec
         coerced[key] = lower_lookup.get(key)
     # Preserve useful metadata if the model returned it.
     for key in ["confidence", "notes"]:
-        if key in fields and key not in coerced:
-            coerced[key] = fields[key]
+        normalized_key = normalize_field_name(key)
+        if normalized_key in lower_lookup and normalized_key not in coerced:
+            coerced[normalized_key] = lower_lookup[normalized_key]
     return coerced
 
 
@@ -356,6 +377,45 @@ def normalize_expense_config(expense_config: dict[str, Any]) -> dict[str, Any]:
     return expense_config
 
 
+def field_label(field_name: str) -> str:
+    return str(field_name or "").replace("_", " ").strip().title()
+
+
+def format_review_value(value: Any) -> str:
+    if value is None:
+        return "Not found"
+    if isinstance(value, bool):
+        return "Yes" if value else "No"
+    if isinstance(value, list):
+        if not value:
+            return "None"
+        lines = []
+        for index, item in enumerate(value, start=1):
+            if isinstance(item, dict):
+                parts = [f"{field_label(k)}: {format_review_value(v)}" for k, v in item.items()]
+                lines.append(f"{index}. " + " | ".join(parts))
+            else:
+                lines.append(f"{index}. {format_review_value(item)}")
+        return "\n".join(lines)
+    if isinstance(value, dict):
+        if not value:
+            return "None"
+        return "\n".join(f"{field_label(k)}: {format_review_value(v)}" for k, v in value.items())
+    text = str(value).strip()
+    return text if text else "Not found"
+
+
+def ordered_review_fields(fields: dict[str, Any]) -> list[tuple[str, Any]]:
+    remaining = dict(fields or {})
+    ordered: list[tuple[str, Any]] = []
+    for key in IMPORTANT_FIELD_ORDER:
+        if key in remaining:
+            ordered.append((key, remaining.pop(key)))
+    for key in sorted(remaining):
+        ordered.append((key, remaining[key]))
+    return ordered
+
+
 class ExpenseReceiptDialog:
     """Tkinter dialog for receipt image upload and configurable extraction."""
 
@@ -370,10 +430,14 @@ class ExpenseReceiptDialog:
         self.model_var = tk.StringVar(value=str(self.expense_config.get("model", "")))
         self.timeout_var = tk.StringVar(value=str(self.expense_config.get("timeout_seconds", 60)))
         self.extra_var = tk.StringVar(value=str(self.expense_config.get("extra_instructions", "")))
+        self.approval_status_var = tk.StringVar(value="No receipt analyzed yet.")
         self.field_vars: list[tuple[tk.StringVar, tk.StringVar]] = []
         self.last_result: ExpenseExtractionResult | None = None
         self.result_text: tk.Text | None = None
+        self.approval_tree: ttk.Treeview | None = None
         self.analyze_button: ttk.Button | None = None
+        self.approve_button: ttk.Button | None = None
+        self.needs_correction_button: ttk.Button | None = None
         self.model_combo: ttk.Combobox | None = None
         self.model_button: ttk.Button | None = None
         self.receipt_canvas: tk.Canvas | None = None
@@ -385,7 +449,7 @@ class ExpenseReceiptDialog:
     def show(self) -> None:
         top = tk.Toplevel(self.parent)
         top.title("Expense Receipt VL Extraction")
-        top.geometry("1180x820")
+        top.geometry("1240x880")
         top.transient(self.parent)
 
         outer = ttk.Frame(top, padding=12)
@@ -395,9 +459,9 @@ class ExpenseReceiptDialog:
             outer,
             text=(
                 "Load a JPG receipt, choose an LM Studio VL model from "
-                f"{LM_STUDIO_HOST}:{LM_STUDIO_PORT}, then customize up to 10 fields to extract."
+                f"{LM_STUDIO_HOST}:{LM_STUDIO_PORT}, then review and approve the extracted expense data."
             ),
-            wraplength=1120,
+            wraplength=1180,
             justify=tk.LEFT,
         ).pack(fill=tk.X, pady=(0, 10))
 
@@ -456,13 +520,32 @@ class ExpenseReceiptDialog:
             ttk.Entry(fields_frame, textvariable=description_var, width=82).grid(row=index + 1, column=1, sticky="ew", padx=4, pady=2)
         fields_frame.columnconfigure(1, weight=1)
 
-        result_frame = ttk.LabelFrame(left_side, text="Extraction result", padding=10)
-        result_frame.pack(fill=tk.BOTH, expand=True)
-        self.result_text = tk.Text(result_frame, height=12, width=90)
+        review_frame = ttk.LabelFrame(left_side, text="Approval Review", padding=10)
+        review_frame.pack(fill=tk.BOTH, expand=True)
+        ttk.Label(
+            review_frame,
+            text="Review the extracted fields below. Use the receipt preview to verify the values before approving.",
+            foreground="#555555",
+        ).pack(anchor="w", pady=(0, 6))
+        ttk.Label(review_frame, textvariable=self.approval_status_var, font=("Segoe UI", 10, "bold")).pack(anchor="w", pady=(0, 6))
+
+        self.approval_tree = ttk.Treeview(review_frame, columns=("Field", "Value"), show="headings", height=11)
+        self.approval_tree.heading("Field", text="Field")
+        self.approval_tree.heading("Value", text="Extracted Value")
+        self.approval_tree.column("Field", width=180, anchor=tk.W)
+        self.approval_tree.column("Value", width=640, anchor=tk.W)
+        self.approval_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        review_scroll = ttk.Scrollbar(review_frame, orient=tk.VERTICAL, command=self.approval_tree.yview)
+        self.approval_tree.configure(yscrollcommand=review_scroll.set)
+        review_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+
+        raw_frame = ttk.LabelFrame(left_side, text="Raw JSON / diagnostics", padding=8)
+        raw_frame.pack(fill=tk.BOTH, expand=True, pady=(10, 0))
+        self.result_text = tk.Text(raw_frame, height=7, width=90)
         self.result_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        scroll = ttk.Scrollbar(result_frame, orient=tk.VERTICAL, command=self.result_text.yview)
-        self.result_text.configure(yscrollcommand=scroll.set)
-        scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        raw_scroll = ttk.Scrollbar(raw_frame, orient=tk.VERTICAL, command=self.result_text.yview)
+        self.result_text.configure(yscrollcommand=raw_scroll.set)
+        raw_scroll.pack(side=tk.RIGHT, fill=tk.Y)
 
         receipt_frame = ttk.LabelFrame(right_side, text="Receipt preview", padding=8)
         receipt_frame.pack(fill=tk.BOTH, expand=True)
@@ -481,6 +564,10 @@ class ExpenseReceiptDialog:
         buttons.pack(fill=tk.X, pady=(0, 0))
         self.analyze_button = ttk.Button(buttons, text="Analyze Receipt", command=self.analyze_receipt)
         self.analyze_button.pack(side=tk.LEFT, padx=4)
+        self.approve_button = ttk.Button(buttons, text="Approve", command=self.approve_result, state="disabled")
+        self.approve_button.pack(side=tk.LEFT, padx=4)
+        self.needs_correction_button = ttk.Button(buttons, text="Needs Correction", command=self.mark_needs_correction, state="disabled")
+        self.needs_correction_button.pack(side=tk.LEFT, padx=4)
         ttk.Button(buttons, text="Save Settings", command=self.save_settings).pack(side=tk.LEFT, padx=4)
         ttk.Button(buttons, text="Export JSON", command=self.export_json).pack(side=tk.LEFT, padx=4)
         ttk.Button(buttons, text="Export CSV", command=self.export_csv).pack(side=tk.LEFT, padx=4)
@@ -497,6 +584,7 @@ class ExpenseReceiptDialog:
         if path:
             self.image_path_var.set(path)
             self.display_receipt(path)
+            self.approval_status_var.set("Receipt loaded. Analyze it to extract expense data.")
 
     def display_receipt(self, path: str) -> None:
         if not self.receipt_canvas:
@@ -513,7 +601,7 @@ class ExpenseReceiptDialog:
             return
         try:
             image = Image.open(path).convert("RGB")
-            image.thumbnail((420, 900), Image.Resampling.LANCZOS)
+            image.thumbnail((460, 980), Image.Resampling.LANCZOS)
             self.receipt_preview_image = image
             self.receipt_photo = ImageTk.PhotoImage(image)
             self.receipt_canvas.create_image(0, 0, anchor=tk.NW, image=self.receipt_photo)
@@ -554,7 +642,7 @@ class ExpenseReceiptDialog:
     def _pick_model_worker(self) -> None:
         try:
             models = self._client_from_settings(timeout_override=10).list_models()
-            self.parent.after(0, lambda: self.show_model_picker(models))
+            self.parent.after(0, lambda found=models: self.show_model_picker(found))
         except Exception as error:
             error_message = str(error)
             self.parent.after(0, lambda msg=error_message: messagebox.showerror("Model List Error", msg))
@@ -612,6 +700,12 @@ class ExpenseReceiptDialog:
         self.save_settings_without_popup()
         if self.analyze_button:
             self.analyze_button.configure(state="disabled")
+        if self.approve_button:
+            self.approve_button.configure(state="disabled")
+        if self.needs_correction_button:
+            self.needs_correction_button.configure(state="disabled")
+        self.approval_status_var.set("Analyzing receipt with LM Studio...")
+        self.clear_approval_view()
         self.write_result("Analyzing receipt...\n")
         threading.Thread(target=self._analyze_worker, daemon=True).start()
 
@@ -642,13 +736,66 @@ class ExpenseReceiptDialog:
                 extra_instructions=self.extra_var.get(),
             )
             self.last_result = result
-            self.parent.after(0, lambda: self.write_result(result.to_json()))
+            self.parent.after(0, lambda res=result: self.show_extraction_result(res))
         except Exception as error:
             error_message = str(error)
-            self.parent.after(0, lambda msg=error_message: self.write_result(f"Error: {msg}\n"))
+            self.parent.after(0, lambda msg=error_message: self.show_analysis_error(msg))
         finally:
             if self.analyze_button:
                 self.parent.after(0, lambda: self.analyze_button.configure(state="normal"))
+
+    def clear_approval_view(self) -> None:
+        if self.approval_tree:
+            self.approval_tree.delete(*self.approval_tree.get_children())
+
+    def show_extraction_result(self, result: ExpenseExtractionResult) -> None:
+        self.write_result(result.to_json())
+        self.populate_approval_view(result)
+        result.approval_status = "Pending Review"
+        result.approved_at = ""
+        self.approval_status_var.set(
+            f"Pending Review — extracted {len(result.fields)} field(s) at {result.extracted_at}. Verify before approving."
+        )
+        if self.approve_button:
+            self.approve_button.configure(state="normal")
+        if self.needs_correction_button:
+            self.needs_correction_button.configure(state="normal")
+
+    def show_analysis_error(self, message: str) -> None:
+        self.approval_status_var.set("Analysis failed. Check the raw diagnostics below.")
+        self.clear_approval_view()
+        self.write_result(f"Error: {message}\n")
+
+    def populate_approval_view(self, result: ExpenseExtractionResult) -> None:
+        if not self.approval_tree:
+            return
+        self.clear_approval_view()
+        for key, value in ordered_review_fields(result.fields):
+            display_value = format_review_value(value)
+            tag = "missing" if display_value == "Not found" else "ok"
+            self.approval_tree.insert("", tk.END, values=(field_label(key), display_value), tags=(tag,))
+        self.approval_tree.tag_configure("missing", foreground="#9a3412")
+        self.approval_tree.tag_configure("ok", foreground="#111827")
+
+    def approve_result(self) -> None:
+        if not self.last_result:
+            messagebox.showwarning("No Result", "Analyze a receipt before approving.")
+            return
+        approved_at = datetime.now().isoformat(timespec="seconds")
+        self.last_result.approval_status = "Approved"
+        self.last_result.approved_at = approved_at
+        self.approval_status_var.set(f"Approved at {approved_at}. Export JSON or CSV when ready.")
+        self.write_result(self.last_result.to_json())
+        messagebox.showinfo("Approved", "Expense extraction approved.")
+
+    def mark_needs_correction(self) -> None:
+        if not self.last_result:
+            messagebox.showwarning("No Result", "Analyze a receipt before marking it for correction.")
+            return
+        self.last_result.approval_status = "Needs Correction"
+        self.last_result.approved_at = ""
+        self.approval_status_var.set("Needs Correction — adjust requested fields/instructions or re-analyze the receipt.")
+        self.write_result(self.last_result.to_json())
 
     def write_result(self, text: str) -> None:
         if not self.result_text:
@@ -685,8 +832,12 @@ class ExpenseReceiptDialog:
         with open(path, "w", encoding="utf-8", newline="") as output:
             writer = csv.writer(output)
             writer.writerow(["field", "value"])
-            for key, value in self.last_result.fields.items():
-                writer.writerow([key, json.dumps(value, ensure_ascii=False) if isinstance(value, (dict, list)) else value])
+            writer.writerow(["approval_status", self.last_result.approval_status])
+            writer.writerow(["approved_at", self.last_result.approved_at])
+            writer.writerow(["extracted_at", self.last_result.extracted_at])
+            writer.writerow(["model", self.last_result.model])
+            for key, value in ordered_review_fields(self.last_result.fields):
+                writer.writerow([key, format_review_value(value)])
         messagebox.showinfo("Saved", f"Saved CSV:\n{path}")
 
 
