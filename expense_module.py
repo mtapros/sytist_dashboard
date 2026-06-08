@@ -422,6 +422,26 @@ def ordered_review_fields(fields: dict[str, Any]) -> list[tuple[str, Any]]:
     return ordered
 
 
+def mousewheel_delta_to_scroll_units(delta: int) -> int:
+    """Convert Tk mouse-wheel deltas to canvas scroll units."""
+
+    if delta == 0:
+        return 0
+    if abs(delta) >= 120:
+        return -int(delta / 120)
+    return -1 if delta > 0 else 1
+
+
+def mousewheel_button_to_scroll_units(button_number: int) -> int:
+    """Convert Linux/X11 wheel button numbers to canvas scroll units."""
+
+    if button_number == 4:
+        return -1
+    if button_number == 5:
+        return 1
+    return 0
+
+
 class ExpenseReceiptDialog:
     """Tkinter dialog for receipt image upload and configurable extraction."""
 
@@ -573,6 +593,7 @@ class ExpenseReceiptDialog:
         self.receipt_scroll_x.grid(row=1, column=0, sticky="ew")
         receipt_frame.rowconfigure(0, weight=1)
         receipt_frame.columnconfigure(0, weight=1)
+        self.bind_receipt_canvas_scroll()
         self.receipt_canvas.create_text(180, 180, text="Choose a receipt JPG\nto display it here.", fill="#666666", justify=tk.CENTER)
 
         buttons = ttk.Frame(outer)
@@ -590,6 +611,45 @@ class ExpenseReceiptDialog:
 
     def use_lm_studio_default(self) -> None:
         self.endpoint_var.set(DEFAULT_LM_STUDIO_ENDPOINT)
+
+    def bind_receipt_canvas_scroll(self) -> None:
+        if not self.receipt_canvas:
+            return
+        self.receipt_canvas.bind("<Enter>", self.enable_receipt_mousewheel)
+        self.receipt_canvas.bind("<Leave>", self.disable_receipt_mousewheel)
+        self.receipt_canvas.bind("<Button-4>", self.scroll_receipt_button_wheel)
+        self.receipt_canvas.bind("<Button-5>", self.scroll_receipt_button_wheel)
+        self.receipt_canvas.bind("<Shift-Button-4>", self.scroll_receipt_button_wheel)
+        self.receipt_canvas.bind("<Shift-Button-5>", self.scroll_receipt_button_wheel)
+
+    def enable_receipt_mousewheel(self, _event=None) -> None:
+        if not self.receipt_canvas:
+            return
+        self.receipt_canvas.bind_all("<MouseWheel>", self.scroll_receipt_mousewheel)
+        self.receipt_canvas.bind_all("<Shift-MouseWheel>", self.scroll_receipt_mousewheel)
+
+    def disable_receipt_mousewheel(self, _event=None) -> None:
+        if not self.receipt_canvas:
+            return
+        self.receipt_canvas.unbind_all("<MouseWheel>")
+        self.receipt_canvas.unbind_all("<Shift-MouseWheel>")
+
+    def scroll_receipt_mousewheel(self, event) -> str:
+        units = mousewheel_delta_to_scroll_units(int(getattr(event, "delta", 0) or 0))
+        return self.scroll_receipt_canvas(units, horizontal=bool(getattr(event, "state", 0) & 0x0001))
+
+    def scroll_receipt_button_wheel(self, event) -> str:
+        units = mousewheel_button_to_scroll_units(int(getattr(event, "num", 0) or 0))
+        return self.scroll_receipt_canvas(units, horizontal=bool(getattr(event, "state", 0) & 0x0001))
+
+    def scroll_receipt_canvas(self, units: int, horizontal: bool = False) -> str:
+        if not self.receipt_canvas or units == 0:
+            return "break"
+        if horizontal:
+            self.receipt_canvas.xview_scroll(units, "units")
+        else:
+            self.receipt_canvas.yview_scroll(units, "units")
+        return "break"
 
     def choose_image(self) -> None:
         path = filedialog.askopenfilename(
