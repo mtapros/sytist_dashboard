@@ -221,11 +221,17 @@ class ExpenseVLClient:
         system_prompt = (
             "You extract expense data from store receipt images. "
             "Return only strict JSON. Do not include markdown fences or commentary. "
-            "Use null when a requested value is not visible. Preserve currency values as strings exactly as read when possible."
+            "Use null when a requested value is not visible. Preserve currency values as strings exactly as read when possible. "
+            "For receipt dates, read the year exactly as printed; do not infer, autocorrect, or substitute a different year."
         )
         user_prompt = {
             "task": "Extract the requested receipt fields from this image.",
             "requested_fields": requested_schema,
+            "date_rules": [
+                "If a receipt date includes a year, preserve that year exactly as visible.",
+                "Pay close attention to similar-looking years such as 2023 and 2026.",
+                "If the date or year is ambiguous, return the best visible value and explain the uncertainty in notes.",
+            ],
             "response_format": {
                 "fields": {name: "value or null" for name in field_names},
                 "confidence": "0-1 overall confidence estimate",
@@ -435,6 +441,8 @@ class ExpenseReceiptDialog:
         self.last_result: ExpenseExtractionResult | None = None
         self.result_text: tk.Text | None = None
         self.approval_tree: ttk.Treeview | None = None
+        self.approval_item_fields: dict[str, str] = {}
+        self.review_edit_widget: ttk.Entry | None = None
         self.analyze_button: ttk.Button | None = None
         self.approve_button: ttk.Button | None = None
         self.needs_correction_button: ttk.Button | None = None
@@ -524,20 +532,27 @@ class ExpenseReceiptDialog:
         review_frame.pack(fill=tk.BOTH, expand=True)
         ttk.Label(
             review_frame,
-            text="Review the extracted fields below. Use the receipt preview to verify the values before approving.",
+            text="Review the extracted fields below. Double-click an extracted value to edit it before approving.",
             foreground="#555555",
         ).pack(anchor="w", pady=(0, 6))
         ttk.Label(review_frame, textvariable=self.approval_status_var, font=("Segoe UI", 10, "bold")).pack(anchor="w", pady=(0, 6))
 
-        self.approval_tree = ttk.Treeview(review_frame, columns=("Field", "Value"), show="headings", height=11)
+        approval_table = ttk.Frame(review_frame)
+        approval_table.pack(fill=tk.BOTH, expand=True)
+        self.approval_tree = ttk.Treeview(approval_table, columns=("Field", "Value"), show="headings", height=11)
         self.approval_tree.heading("Field", text="Field")
         self.approval_tree.heading("Value", text="Extracted Value")
         self.approval_tree.column("Field", width=180, anchor=tk.W)
         self.approval_tree.column("Value", width=640, anchor=tk.W)
-        self.approval_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        review_scroll = ttk.Scrollbar(review_frame, orient=tk.VERTICAL, command=self.approval_tree.yview)
-        self.approval_tree.configure(yscrollcommand=review_scroll.set)
-        review_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self.approval_tree.grid(row=0, column=0, sticky="nsew")
+        review_scroll_y = ttk.Scrollbar(approval_table, orient=tk.VERTICAL, command=self.approval_tree.yview)
+        review_scroll_x = ttk.Scrollbar(approval_table, orient=tk.HORIZONTAL, command=self.approval_tree.xview)
+        self.approval_tree.configure(yscrollcommand=review_scroll_y.set, xscrollcommand=review_scroll_x.set)
+        review_scroll_y.grid(row=0, column=1, sticky="ns")
+        review_scroll_x.grid(row=1, column=0, sticky="ew")
+        approval_table.rowconfigure(0, weight=1)
+        approval_table.columnconfigure(0, weight=1)
+        self.approval_tree.bind("<Double-Button-1>", self.begin_approval_value_edit)
 
         raw_frame = ttk.LabelFrame(left_side, text="Raw JSON / diagnostics", padding=8)
         raw_frame.pack(fill=tk.BOTH, expand=True, pady=(10, 0))
@@ -745,6 +760,8 @@ class ExpenseReceiptDialog:
                 self.parent.after(0, lambda: self.analyze_button.configure(state="normal"))
 
     def clear_approval_view(self) -> None:
+        self.cancel_review_edit()
+        self.approval_item_fields.clear()
         if self.approval_tree:
             self.approval_tree.delete(*self.approval_tree.get_children())
 
@@ -773,9 +790,60 @@ class ExpenseReceiptDialog:
         for key, value in ordered_review_fields(result.fields):
             display_value = format_review_value(value)
             tag = "missing" if display_value == "Not found" else "ok"
-            self.approval_tree.insert("", tk.END, values=(field_label(key), display_value), tags=(tag,))
+            item_id = self.approval_tree.insert("", tk.END, values=(field_label(key), display_value), tags=(tag,))
+            self.approval_item_fields[item_id] = key
         self.approval_tree.tag_configure("missing", foreground="#9a3412")
         self.approval_tree.tag_configure("ok", foreground="#111827")
+
+    def begin_approval_value_edit(self, event: tk.Event) -> None:
+        if not self.approval_tree or not self.last_result:
+            return
+        item_id = self.approval_tree.identify_row(event.y)
+        column = self.approval_tree.identify_column(event.x)
+        if not item_id or column != "#2" or item_id not in self.approval_item_fields:
+            return
+        self.cancel_review_edit()
+        bbox = self.approval_tree.bbox(item_id, column)
+        if not bbox:
+            return
+        x, y, width, height = bbox
+        current_value = self.approval_tree.set(item_id, "Value")
+        editor = ttk.Entry(self.approval_tree)
+        editor.insert(0, current_value)
+        editor.select_range(0, tk.END)
+        editor.place(x=x, y=y, width=width, height=height)
+        editor.focus_set()
+
+        def commit(_event=None) -> None:
+            if self.review_edit_widget is not editor:
+                return
+            self.commit_approval_value_edit(item_id, editor.get())
+
+        editor.bind("<Return>", commit)
+        editor.bind("<FocusOut>", commit)
+        editor.bind("<Escape>", lambda _event: self.cancel_review_edit())
+        self.review_edit_widget = editor
+
+    def commit_approval_value_edit(self, item_id: str, edited_value: str) -> None:
+        if not self.approval_tree or not self.last_result:
+            self.cancel_review_edit()
+            return
+        field_key = self.approval_item_fields.get(item_id)
+        if not field_key:
+            self.cancel_review_edit()
+            return
+        self.last_result.fields[field_key] = edited_value.strip()
+        display_value = format_review_value(self.last_result.fields[field_key])
+        tag = "missing" if display_value == "Not found" else "ok"
+        self.approval_tree.item(item_id, values=(field_label(field_key), display_value), tags=(tag,))
+        self.cancel_review_edit()
+        self.approval_status_var.set("Pending Review — edited extracted values. Verify before approving.")
+        self.write_result(self.last_result.to_json())
+
+    def cancel_review_edit(self) -> None:
+        if self.review_edit_widget:
+            self.review_edit_widget.destroy()
+            self.review_edit_widget = None
 
     def approve_result(self) -> None:
         if not self.last_result:
