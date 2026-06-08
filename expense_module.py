@@ -4,9 +4,10 @@ This module provides a small Tkinter UI and a provider-agnostic client for
 sending a JPG/JPEG receipt image to a vision-language (VL/VLM) endpoint and
 asking it to return structured expense information.
 
-The HTTP payload is intentionally OpenAI-compatible because many hosted and
-local VL services support that format. Configure the endpoint, API key, and
-model in the dialog, then customize up to 10 extraction fields.
+The default endpoint targets LM Studio on the local network at
+``192.168.34.82:1234`` using LM Studio's OpenAI-compatible API. The dialog can
+also fetch the currently available LM Studio models and displays the selected
+receipt image before analysis.
 """
 
 from __future__ import annotations
@@ -24,6 +25,18 @@ from typing import Any, Iterable
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
+try:
+    from PIL import Image, ImageTk
+    HAS_PIL = True
+except ImportError:  # pragma: no cover - depends on optional runtime package
+    Image = None
+    ImageTk = None
+    HAS_PIL = False
+
+
+LM_STUDIO_HOST = "192.168.34.82"
+LM_STUDIO_PORT = 1234
+DEFAULT_LM_STUDIO_ENDPOINT = f"http://{LM_STUDIO_HOST}:{LM_STUDIO_PORT}/v1/chat/completions"
 
 DEFAULT_EXPENSE_FIELDS: list[dict[str, str]] = [
     {"name": "merchant_name", "description": "Store, restaurant, vendor, or merchant name."},
@@ -82,6 +95,42 @@ class ExpenseVLClient:
         self.api_key = (api_key or "").strip()
         self.model = (model or "").strip()
         self.timeout_seconds = max(1, int(timeout_seconds or 60))
+
+    def list_models(self) -> list[str]:
+        """Return model IDs from an OpenAI-compatible /v1/models endpoint."""
+
+        models_url = build_models_url(self.endpoint_url)
+        headers = {"Accept": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        request = urllib.request.Request(models_url, headers=headers, method="GET")
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
+                raw_body = response.read().decode("utf-8", errors="replace")
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace")
+            raise ExpenseVLClientError(f"Model list returned HTTP {exc.code}: {body or exc.reason}") from exc
+        except urllib.error.URLError as exc:
+            raise ExpenseVLClientError(f"Could not reach LM Studio models endpoint: {exc.reason}") from exc
+        except TimeoutError as exc:
+            raise ExpenseVLClientError("LM Studio model list timed out.") from exc
+
+        try:
+            parsed = json.loads(raw_body)
+        except json.JSONDecodeError as exc:
+            raise ExpenseVLClientError(f"Models endpoint did not return JSON: {raw_body[:500]}") from exc
+
+        data = parsed.get("data", []) if isinstance(parsed, dict) else []
+        models: list[str] = []
+        if isinstance(data, list):
+            for item in data:
+                if isinstance(item, dict):
+                    model_id = str(item.get("id", "")).strip()
+                    if model_id:
+                        models.append(model_id)
+                elif isinstance(item, str) and item.strip():
+                    models.append(item.strip())
+        return sorted(dict.fromkeys(models))
 
     def extract_receipt(
         self,
@@ -183,6 +232,19 @@ class ExpenseVLClient:
         }
 
 
+def build_models_url(endpoint_url: str) -> str:
+    """Derive LM Studio/OpenAI-compatible /v1/models URL from chat endpoint."""
+
+    endpoint = (endpoint_url or DEFAULT_LM_STUDIO_ENDPOINT).strip().rstrip("/")
+    if endpoint.endswith("/v1/chat/completions"):
+        return endpoint[: -len("/chat/completions")] + "/models"
+    if endpoint.endswith("/chat/completions"):
+        return endpoint[: -len("/chat/completions")] + "/models"
+    if endpoint.endswith("/v1"):
+        return endpoint + "/models"
+    return endpoint + "/v1/models"
+
+
 def normalize_field_name(name: str) -> str:
     cleaned = "".join(ch if ch.isalnum() else "_" for ch in str(name or "").strip().lower())
     while "__" in cleaned:
@@ -276,7 +338,7 @@ def coerce_requested_fields(fields: dict[str, Any], specs: list[ExpenseFieldSpec
 
 def default_expense_config() -> dict[str, Any]:
     return {
-        "endpoint_url": "",
+        "endpoint_url": DEFAULT_LM_STUDIO_ENDPOINT,
         "api_key": "",
         "model": "",
         "timeout_seconds": 60,
@@ -285,16 +347,25 @@ def default_expense_config() -> dict[str, Any]:
     }
 
 
+def normalize_expense_config(expense_config: dict[str, Any]) -> dict[str, Any]:
+    defaults = default_expense_config()
+    for key, value in defaults.items():
+        expense_config.setdefault(key, value)
+    if not str(expense_config.get("endpoint_url", "")).strip():
+        expense_config["endpoint_url"] = DEFAULT_LM_STUDIO_ENDPOINT
+    return expense_config
+
+
 class ExpenseReceiptDialog:
     """Tkinter dialog for receipt image upload and configurable extraction."""
 
     def __init__(self, parent: tk.Misc, config: dict[str, Any] | None = None, on_config_saved=None) -> None:
         self.parent = parent
         self.config = config if isinstance(config, dict) else {}
-        self.expense_config = self.config.setdefault("expense_vl", default_expense_config())
+        self.expense_config = normalize_expense_config(self.config.setdefault("expense_vl", default_expense_config()))
         self.on_config_saved = on_config_saved
         self.image_path_var = tk.StringVar(value="")
-        self.endpoint_var = tk.StringVar(value=str(self.expense_config.get("endpoint_url", "")))
+        self.endpoint_var = tk.StringVar(value=str(self.expense_config.get("endpoint_url", DEFAULT_LM_STUDIO_ENDPOINT)))
         self.api_key_var = tk.StringVar(value=str(self.expense_config.get("api_key", "")))
         self.model_var = tk.StringVar(value=str(self.expense_config.get("model", "")))
         self.timeout_var = tk.StringVar(value=str(self.expense_config.get("timeout_seconds", 60)))
@@ -303,11 +374,18 @@ class ExpenseReceiptDialog:
         self.last_result: ExpenseExtractionResult | None = None
         self.result_text: tk.Text | None = None
         self.analyze_button: ttk.Button | None = None
+        self.model_combo: ttk.Combobox | None = None
+        self.model_button: ttk.Button | None = None
+        self.receipt_canvas: tk.Canvas | None = None
+        self.receipt_scroll_y: ttk.Scrollbar | None = None
+        self.receipt_scroll_x: ttk.Scrollbar | None = None
+        self.receipt_photo = None
+        self.receipt_preview_image = None
 
     def show(self) -> None:
         top = tk.Toplevel(self.parent)
         top.title("Expense Receipt VL Extraction")
-        top.geometry("980x760")
+        top.geometry("1180x820")
         top.transient(self.parent)
 
         outer = ttk.Frame(top, padding=12)
@@ -315,23 +393,32 @@ class ExpenseReceiptDialog:
 
         ttk.Label(
             outer,
-            text="Load a JPG receipt, choose your VL endpoint/model, then customize up to 10 fields to extract.",
-            wraplength=920,
+            text=(
+                "Load a JPG receipt, choose an LM Studio VL model from "
+                f"{LM_STUDIO_HOST}:{LM_STUDIO_PORT}, then customize up to 10 fields to extract."
+            ),
+            wraplength=1120,
             justify=tk.LEFT,
         ).pack(fill=tk.X, pady=(0, 10))
 
-        settings = ttk.LabelFrame(outer, text="VL settings", padding=10)
+        settings = ttk.LabelFrame(outer, text="LM Studio VL settings", padding=10)
         settings.pack(fill=tk.X)
         ttk.Label(settings, text="Endpoint URL:").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=4)
-        ttk.Entry(settings, textvariable=self.endpoint_var, width=72).grid(row=0, column=1, columnspan=3, sticky="ew", pady=4)
+        ttk.Entry(settings, textvariable=self.endpoint_var, width=72).grid(row=0, column=1, columnspan=4, sticky="ew", pady=4)
+        ttk.Button(settings, text="Use LM Studio Default", command=self.use_lm_studio_default).grid(row=0, column=5, sticky="ew", padx=(8, 0), pady=4)
+
         ttk.Label(settings, text="Model:").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=4)
-        ttk.Entry(settings, textvariable=self.model_var, width=28).grid(row=1, column=1, sticky="ew", pady=4)
-        ttk.Label(settings, text="Timeout:").grid(row=1, column=2, sticky="w", padx=(16, 8), pady=4)
-        ttk.Entry(settings, textvariable=self.timeout_var, width=10).grid(row=1, column=3, sticky="w", pady=4)
+        self.model_combo = ttk.Combobox(settings, textvariable=self.model_var, width=42)
+        self.model_combo.grid(row=1, column=1, sticky="ew", pady=4)
+        self.model_button = ttk.Button(settings, text="Pick Available Model", command=self.pick_model)
+        self.model_button.grid(row=1, column=2, sticky="ew", padx=(8, 0), pady=4)
+        ttk.Label(settings, text="Timeout:").grid(row=1, column=3, sticky="w", padx=(16, 8), pady=4)
+        ttk.Entry(settings, textvariable=self.timeout_var, width=10).grid(row=1, column=4, sticky="w", pady=4)
+
         ttk.Label(settings, text="API key:").grid(row=2, column=0, sticky="w", padx=(0, 8), pady=4)
-        ttk.Entry(settings, textvariable=self.api_key_var, width=72, show="*").grid(row=2, column=1, columnspan=3, sticky="ew", pady=4)
+        ttk.Entry(settings, textvariable=self.api_key_var, width=72, show="*").grid(row=2, column=1, columnspan=4, sticky="ew", pady=4)
         ttk.Label(settings, text="Extra instructions:").grid(row=3, column=0, sticky="w", padx=(0, 8), pady=4)
-        ttk.Entry(settings, textvariable=self.extra_var, width=72).grid(row=3, column=1, columnspan=3, sticky="ew", pady=4)
+        ttk.Entry(settings, textvariable=self.extra_var, width=72).grid(row=3, column=1, columnspan=4, sticky="ew", pady=4)
         settings.columnconfigure(1, weight=1)
 
         image_row = ttk.Frame(outer)
@@ -340,7 +427,15 @@ class ExpenseReceiptDialog:
         ttk.Entry(image_row, textvariable=self.image_path_var).pack(side=tk.LEFT, fill=tk.X, expand=True)
         ttk.Button(image_row, text="Browse", command=self.choose_image).pack(side=tk.LEFT, padx=6)
 
-        fields_frame = ttk.LabelFrame(outer, text="Return fields (10 customizable slots)", padding=10)
+        body = ttk.PanedWindow(outer, orient=tk.HORIZONTAL)
+        body.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+
+        left_side = ttk.Frame(body)
+        body.add(left_side, weight=2)
+        right_side = ttk.Frame(body)
+        body.add(right_side, weight=1)
+
+        fields_frame = ttk.LabelFrame(left_side, text="Return fields (10 customizable slots)", padding=10)
         fields_frame.pack(fill=tk.X, pady=(0, 10))
         ttk.Label(fields_frame, text="Field name").grid(row=0, column=0, sticky="w", padx=4)
         ttk.Label(fields_frame, text="What should the VL return?").grid(row=0, column=1, sticky="w", padx=4)
@@ -361,22 +456,38 @@ class ExpenseReceiptDialog:
             ttk.Entry(fields_frame, textvariable=description_var, width=82).grid(row=index + 1, column=1, sticky="ew", padx=4, pady=2)
         fields_frame.columnconfigure(1, weight=1)
 
-        result_frame = ttk.LabelFrame(outer, text="Extraction result", padding=10)
+        result_frame = ttk.LabelFrame(left_side, text="Extraction result", padding=10)
         result_frame.pack(fill=tk.BOTH, expand=True)
-        self.result_text = tk.Text(result_frame, height=12, width=110)
+        self.result_text = tk.Text(result_frame, height=12, width=90)
         self.result_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scroll = ttk.Scrollbar(result_frame, orient=tk.VERTICAL, command=self.result_text.yview)
         self.result_text.configure(yscrollcommand=scroll.set)
         scroll.pack(side=tk.RIGHT, fill=tk.Y)
 
+        receipt_frame = ttk.LabelFrame(right_side, text="Receipt preview", padding=8)
+        receipt_frame.pack(fill=tk.BOTH, expand=True)
+        self.receipt_canvas = tk.Canvas(receipt_frame, background="#f7f7f7", highlightthickness=0)
+        self.receipt_scroll_y = ttk.Scrollbar(receipt_frame, orient=tk.VERTICAL, command=self.receipt_canvas.yview)
+        self.receipt_scroll_x = ttk.Scrollbar(receipt_frame, orient=tk.HORIZONTAL, command=self.receipt_canvas.xview)
+        self.receipt_canvas.configure(yscrollcommand=self.receipt_scroll_y.set, xscrollcommand=self.receipt_scroll_x.set)
+        self.receipt_canvas.grid(row=0, column=0, sticky="nsew")
+        self.receipt_scroll_y.grid(row=0, column=1, sticky="ns")
+        self.receipt_scroll_x.grid(row=1, column=0, sticky="ew")
+        receipt_frame.rowconfigure(0, weight=1)
+        receipt_frame.columnconfigure(0, weight=1)
+        self.receipt_canvas.create_text(180, 180, text="Choose a receipt JPG\nto display it here.", fill="#666666", justify=tk.CENTER)
+
         buttons = ttk.Frame(outer)
-        buttons.pack(fill=tk.X, pady=(10, 0))
+        buttons.pack(fill=tk.X, pady=(0, 0))
         self.analyze_button = ttk.Button(buttons, text="Analyze Receipt", command=self.analyze_receipt)
         self.analyze_button.pack(side=tk.LEFT, padx=4)
         ttk.Button(buttons, text="Save Settings", command=self.save_settings).pack(side=tk.LEFT, padx=4)
         ttk.Button(buttons, text="Export JSON", command=self.export_json).pack(side=tk.LEFT, padx=4)
         ttk.Button(buttons, text="Export CSV", command=self.export_csv).pack(side=tk.LEFT, padx=4)
         ttk.Button(buttons, text="Close", command=top.destroy).pack(side=tk.RIGHT, padx=4)
+
+    def use_lm_studio_default(self) -> None:
+        self.endpoint_var.set(DEFAULT_LM_STUDIO_ENDPOINT)
 
     def choose_image(self) -> None:
         path = filedialog.askopenfilename(
@@ -385,28 +496,115 @@ class ExpenseReceiptDialog:
         )
         if path:
             self.image_path_var.set(path)
+            self.display_receipt(path)
+
+    def display_receipt(self, path: str) -> None:
+        if not self.receipt_canvas:
+            return
+        self.receipt_canvas.delete("all")
+        if not HAS_PIL or Image is None or ImageTk is None:
+            self.receipt_canvas.create_text(
+                180,
+                180,
+                text="Install Pillow to display receipt previews:\npip install Pillow",
+                fill="#a33",
+                justify=tk.CENTER,
+            )
+            return
+        try:
+            image = Image.open(path).convert("RGB")
+            image.thumbnail((420, 900), Image.Resampling.LANCZOS)
+            self.receipt_preview_image = image
+            self.receipt_photo = ImageTk.PhotoImage(image)
+            self.receipt_canvas.create_image(0, 0, anchor=tk.NW, image=self.receipt_photo)
+            self.receipt_canvas.configure(scrollregion=(0, 0, image.width, image.height))
+        except Exception as exc:
+            self.receipt_canvas.create_text(
+                180,
+                180,
+                text=f"Could not display receipt:\n{exc}",
+                fill="#a33",
+                justify=tk.CENTER,
+            )
 
     def collect_field_specs(self) -> list[ExpenseFieldSpec]:
         specs = [ExpenseFieldSpec(name.get(), desc.get()) for name, desc in self.field_vars]
         return normalize_field_specs(specs)
 
-    def save_settings(self) -> None:
+    def _client_from_settings(self, timeout_override: int | None = None) -> ExpenseVLClient:
         try:
             timeout = max(1, int(float(self.timeout_var.get() or 60)))
         except ValueError:
             timeout = 60
-        self.expense_config.update(
-            {
-                "endpoint_url": self.endpoint_var.get().strip(),
-                "api_key": self.api_key_var.get().strip(),
-                "model": self.model_var.get().strip(),
-                "timeout_seconds": timeout,
-                "extra_instructions": self.extra_var.get().strip(),
-                "fields": [asdict(spec) for spec in self.collect_field_specs()],
-            }
+        if timeout_override is not None:
+            timeout = timeout_override
+        return ExpenseVLClient(
+            endpoint_url=self.endpoint_var.get(),
+            api_key=self.api_key_var.get(),
+            model=self.model_var.get(),
+            timeout_seconds=timeout,
         )
-        if callable(self.on_config_saved):
-            self.on_config_saved()
+
+    def pick_model(self) -> None:
+        if self.model_button:
+            self.model_button.configure(state="disabled")
+        self.write_result(f"Fetching models from {build_models_url(self.endpoint_var.get())}...\n")
+        threading.Thread(target=self._pick_model_worker, daemon=True).start()
+
+    def _pick_model_worker(self) -> None:
+        try:
+            models = self._client_from_settings(timeout_override=10).list_models()
+            self.parent.after(0, lambda: self.show_model_picker(models))
+        except Exception as exc:
+            self.parent.after(0, lambda: messagebox.showerror("Model List Error", str(exc)))
+            self.parent.after(0, lambda: self.write_result(f"Error fetching models: {exc}\n"))
+        finally:
+            if self.model_button:
+                self.parent.after(0, lambda: self.model_button.configure(state="normal"))
+
+    def show_model_picker(self, models: list[str]) -> None:
+        if self.model_combo:
+            self.model_combo.configure(values=models)
+        if not models:
+            messagebox.showwarning(
+                "No Models Found",
+                "LM Studio responded, but no models were returned. Make sure a vision-capable model is loaded/available.",
+            )
+            return
+
+        picker = tk.Toplevel(self.parent)
+        picker.title("Pick LM Studio Model")
+        picker.geometry("520x360")
+        picker.transient(self.parent)
+        picker.grab_set()
+
+        frame = ttk.Frame(picker, padding=12)
+        frame.pack(fill=tk.BOTH, expand=True)
+        ttk.Label(frame, text="Available LM Studio models:").pack(anchor="w", pady=(0, 8))
+        listbox = tk.Listbox(frame, height=12)
+        listbox.pack(fill=tk.BOTH, expand=True)
+        for model in models:
+            listbox.insert(tk.END, model)
+            if model == self.model_var.get():
+                listbox.selection_set(tk.END)
+        if not listbox.curselection():
+            listbox.selection_set(0)
+
+        def select_model() -> None:
+            selection = listbox.curselection()
+            if selection:
+                self.model_var.set(models[selection[0]])
+                self.save_settings_without_popup()
+            picker.destroy()
+
+        button_row = ttk.Frame(frame)
+        button_row.pack(fill=tk.X, pady=(10, 0))
+        ttk.Button(button_row, text="Use Selected Model", command=select_model).pack(side=tk.LEFT, padx=4)
+        ttk.Button(button_row, text="Cancel", command=picker.destroy).pack(side=tk.RIGHT, padx=4)
+        listbox.bind("<Double-Button-1>", lambda _event: select_model())
+
+    def save_settings(self) -> None:
+        self.save_settings_without_popup()
         messagebox.showinfo("Saved", "Expense VL settings saved.")
 
     def analyze_receipt(self) -> None:
@@ -423,7 +621,7 @@ class ExpenseReceiptDialog:
             timeout = 60
         self.expense_config.update(
             {
-                "endpoint_url": self.endpoint_var.get().strip(),
+                "endpoint_url": self.endpoint_var.get().strip() or DEFAULT_LM_STUDIO_ENDPOINT,
                 "api_key": self.api_key_var.get().strip(),
                 "model": self.model_var.get().strip(),
                 "timeout_seconds": timeout,
@@ -436,12 +634,7 @@ class ExpenseReceiptDialog:
 
     def _analyze_worker(self) -> None:
         try:
-            client = ExpenseVLClient(
-                endpoint_url=self.endpoint_var.get(),
-                api_key=self.api_key_var.get(),
-                model=self.model_var.get(),
-                timeout_seconds=int(float(self.timeout_var.get() or 60)),
-            )
+            client = self._client_from_settings()
             result = client.extract_receipt(
                 self.image_path_var.get(),
                 self.collect_field_specs(),
