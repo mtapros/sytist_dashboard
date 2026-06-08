@@ -23,8 +23,17 @@ import urllib.request
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from typing import Any, Iterable
-import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+
+try:
+    import tkinter as tk
+    from tkinter import filedialog, messagebox, ttk
+    HAS_TKINTER = True
+except ImportError:  # pragma: no cover - depends on Python runtime packaging
+    tk = None
+    filedialog = None
+    messagebox = None
+    ttk = None
+    HAS_TKINTER = False
 
 try:
     from PIL import Image, ImageTk
@@ -446,6 +455,8 @@ class ExpenseReceiptDialog:
     """Tkinter dialog for receipt image upload and configurable extraction."""
 
     def __init__(self, parent: tk.Misc, config: dict[str, Any] | None = None, on_config_saved=None) -> None:
+        if not HAS_TKINTER or tk is None:
+            raise RuntimeError("tkinter is required to open the expense receipt dialog.")
         self.parent = parent
         self.config = config if isinstance(config, dict) else {}
         self.expense_config = normalize_expense_config(self.config.setdefault("expense_vl", default_expense_config()))
