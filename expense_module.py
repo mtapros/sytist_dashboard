@@ -107,18 +107,18 @@ class ExpenseVLClient:
         try:
             with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
                 raw_body = response.read().decode("utf-8", errors="replace")
-        except urllib.error.HTTPError as exc:
-            body = exc.read().decode("utf-8", errors="replace")
-            raise ExpenseVLClientError(f"Model list returned HTTP {exc.code}: {body or exc.reason}") from exc
-        except urllib.error.URLError as exc:
-            raise ExpenseVLClientError(f"Could not reach LM Studio models endpoint: {exc.reason}") from exc
-        except TimeoutError as exc:
-            raise ExpenseVLClientError("LM Studio model list timed out.") from exc
+        except urllib.error.HTTPError as error:
+            body = error.read().decode("utf-8", errors="replace")
+            raise ExpenseVLClientError(f"Model list returned HTTP {error.code}: {body or error.reason}") from error
+        except urllib.error.URLError as error:
+            raise ExpenseVLClientError(f"Could not reach LM Studio models endpoint: {error.reason}") from error
+        except TimeoutError as error:
+            raise ExpenseVLClientError("LM Studio model list timed out.") from error
 
         try:
             parsed = json.loads(raw_body)
-        except json.JSONDecodeError as exc:
-            raise ExpenseVLClientError(f"Models endpoint did not return JSON: {raw_body[:500]}") from exc
+        except json.JSONDecodeError as error:
+            raise ExpenseVLClientError(f"Models endpoint did not return JSON: {raw_body[:500]}") from error
 
         data = parsed.get("data", []) if isinstance(parsed, dict) else []
         models: list[str] = []
@@ -163,20 +163,20 @@ class ExpenseVLClient:
         try:
             with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
                 raw_body = response.read().decode("utf-8", errors="replace")
-        except urllib.error.HTTPError as exc:
-            body = exc.read().decode("utf-8", errors="replace")
-            raise ExpenseVLClientError(f"VL endpoint returned HTTP {exc.code}: {body or exc.reason}") from exc
-        except urllib.error.URLError as exc:
-            raise ExpenseVLClientError(f"Could not reach VL endpoint: {exc.reason}") from exc
-        except TimeoutError as exc:
-            raise ExpenseVLClientError("VL endpoint timed out.") from exc
-        except Exception as exc:  # pragma: no cover - defensive wrapper
-            raise ExpenseVLClientError(f"Unexpected VL endpoint error: {exc}") from exc
+        except urllib.error.HTTPError as error:
+            body = error.read().decode("utf-8", errors="replace")
+            raise ExpenseVLClientError(f"VL endpoint returned HTTP {error.code}: {body or error.reason}") from error
+        except urllib.error.URLError as error:
+            raise ExpenseVLClientError(f"Could not reach VL endpoint: {error.reason}") from error
+        except TimeoutError as error:
+            raise ExpenseVLClientError("VL endpoint timed out.") from error
+        except Exception as error:  # pragma: no cover - defensive wrapper
+            raise ExpenseVLClientError(f"Unexpected VL endpoint error: {error}") from error
 
         try:
             raw_response = json.loads(raw_body)
-        except json.JSONDecodeError as exc:
-            raise ExpenseVLClientError(f"VL endpoint did not return JSON: {raw_body[:500]}") from exc
+        except json.JSONDecodeError as error:
+            raise ExpenseVLClientError(f"VL endpoint did not return JSON: {raw_body[:500]}") from error
 
         fields = parse_vl_fields(raw_response)
         fields = coerce_requested_fields(fields, specs)
@@ -518,11 +518,11 @@ class ExpenseReceiptDialog:
             self.receipt_photo = ImageTk.PhotoImage(image)
             self.receipt_canvas.create_image(0, 0, anchor=tk.NW, image=self.receipt_photo)
             self.receipt_canvas.configure(scrollregion=(0, 0, image.width, image.height))
-        except Exception as exc:
+        except Exception as error:
             self.receipt_canvas.create_text(
                 180,
                 180,
-                text=f"Could not display receipt:\n{exc}",
+                text=f"Could not display receipt:\n{error}",
                 fill="#a33",
                 justify=tk.CENTER,
             )
@@ -555,8 +555,8 @@ class ExpenseReceiptDialog:
         try:
             models = self._client_from_settings(timeout_override=10).list_models()
             self.parent.after(0, lambda: self.show_model_picker(models))
-        except Exception as exc:
-            error_message = str(exc)
+        except Exception as error:
+            error_message = str(error)
             self.parent.after(0, lambda msg=error_message: messagebox.showerror("Model List Error", msg))
             self.parent.after(0, lambda msg=error_message: self.write_result(f"Error fetching models: {msg}\n"))
         finally:
@@ -643,8 +643,8 @@ class ExpenseReceiptDialog:
             )
             self.last_result = result
             self.parent.after(0, lambda: self.write_result(result.to_json()))
-        except Exception as exc:
-            error_message = str(exc)
+        except Exception as error:
+            error_message = str(error)
             self.parent.after(0, lambda msg=error_message: self.write_result(f"Error: {msg}\n"))
         finally:
             if self.analyze_button:
