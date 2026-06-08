@@ -7,9 +7,11 @@ from expense_module import (
     ExpenseFieldSpec,
     ExpenseReceiptDialog,
     ExpenseVLClient,
+    MAX_EXPENSE_FIELD_SLOTS,
     format_review_value,
     mousewheel_button_to_scroll_units,
     mousewheel_delta_to_scroll_units,
+    normalize_field_specs,
 )
 
 
@@ -70,6 +72,13 @@ class ExpenseModuleTests(unittest.TestCase):
 
         self.assertEqual(dialog.scroll_expense_window(-2, horizontal=True), "break")
         self.assertEqual(dialog.expense_scroll_canvas.calls[-1], ("x", -2, "units"))
+
+    def test_normalize_field_specs_allows_twenty_optional_slots(self):
+        specs = [ExpenseFieldSpec(f"field_{index}", f"desc {index}") for index in range(25)]
+        normalized = normalize_field_specs(specs)
+
+        self.assertEqual(len(normalized), MAX_EXPENSE_FIELD_SLOTS)
+        self.assertEqual(normalized[-1].name, f"field_{MAX_EXPENSE_FIELD_SLOTS - 1}")
 
 
 if __name__ == "__main__":

@@ -61,6 +61,8 @@ DEFAULT_EXPENSE_FIELDS: list[dict[str, str]] = [
     {"name": "expense_category", "description": "Best-fit category such as Meals, Supplies, Travel, Fuel, or Office."},
 ]
 
+MAX_EXPENSE_FIELD_SLOTS = 20
+
 IMPORTANT_FIELD_ORDER = [
     "merchant_name",
     "receipt_date",
@@ -302,7 +304,7 @@ def normalize_field_specs(field_specs: Iterable[ExpenseFieldSpec | dict[str, str
             continue
         normalized.append(ExpenseFieldSpec(normalized_name, description.strip()))
         seen.add(normalized_name)
-        if len(normalized) >= 10:
+        if len(normalized) >= MAX_EXPENSE_FIELD_SLOTS:
             break
     return normalized
 
@@ -473,6 +475,7 @@ class ExpenseReceiptDialog:
         self.result_text: tk.Text | None = None
         self.approval_tree: ttk.Treeview | None = None
         self.approval_item_fields: dict[str, str] = {}
+        self.approval_window: tk.Toplevel | None = None
         self.review_edit_widget: ttk.Entry | None = None
         self.analyze_button: ttk.Button | None = None
         self.approve_button: ttk.Button | None = None
@@ -559,19 +562,21 @@ class ExpenseReceiptDialog:
         right_side = ttk.Frame(body)
         body.add(right_side, weight=1)
 
-        fields_frame = ttk.LabelFrame(left_side, text="Return fields (10 customizable slots)", padding=10)
+        fields_frame = ttk.LabelFrame(left_side, text=f"Return fields ({MAX_EXPENSE_FIELD_SLOTS} optional customizable slots)", padding=10)
         fields_frame.pack(fill=tk.X, pady=(0, 10))
         ttk.Label(fields_frame, text="Field name").grid(row=0, column=0, sticky="w", padx=4)
         ttk.Label(fields_frame, text="What should the VL return?").grid(row=0, column=1, sticky="w", padx=4)
 
         configured_fields = self.expense_config.get("fields") or DEFAULT_EXPENSE_FIELDS
         normalized_fields = normalize_field_specs(configured_fields)
-        while len(normalized_fields) < 10:
+        while len(normalized_fields) < min(len(DEFAULT_EXPENSE_FIELDS), MAX_EXPENSE_FIELD_SLOTS):
             default = DEFAULT_EXPENSE_FIELDS[len(normalized_fields)]
             normalized_fields.append(ExpenseFieldSpec(default["name"], default["description"]))
+        while len(normalized_fields) < MAX_EXPENSE_FIELD_SLOTS:
+            normalized_fields.append(ExpenseFieldSpec("", ""))
 
         self.field_vars.clear()
-        for index in range(10):
+        for index in range(MAX_EXPENSE_FIELD_SLOTS):
             spec = normalized_fields[index]
             name_var = tk.StringVar(value=spec.name)
             description_var = tk.StringVar(value=spec.description)
@@ -581,30 +586,16 @@ class ExpenseReceiptDialog:
         fields_frame.columnconfigure(1, weight=1)
 
         review_frame = ttk.LabelFrame(left_side, text="Approval Review", padding=10)
-        review_frame.pack(fill=tk.BOTH, expand=True)
+        review_frame.pack(fill=tk.X)
         ttk.Label(
             review_frame,
-            text="Review the extracted fields below. Double-click an extracted value to edit it before approving.",
+            text="Review results in a separate scrollable summary window so this main interface stays scrollable.",
             foreground="#555555",
+            wraplength=760,
+            justify=tk.LEFT,
         ).pack(anchor="w", pady=(0, 6))
         ttk.Label(review_frame, textvariable=self.approval_status_var, font=("Segoe UI", 10, "bold")).pack(anchor="w", pady=(0, 6))
-
-        approval_table = ttk.Frame(review_frame)
-        approval_table.pack(fill=tk.BOTH, expand=True)
-        self.approval_tree = ttk.Treeview(approval_table, columns=("Field", "Value"), show="headings", height=11)
-        self.approval_tree.heading("Field", text="Field")
-        self.approval_tree.heading("Value", text="Extracted Value")
-        self.approval_tree.column("Field", width=180, anchor=tk.W)
-        self.approval_tree.column("Value", width=640, anchor=tk.W)
-        self.approval_tree.grid(row=0, column=0, sticky="nsew")
-        review_scroll_y = ttk.Scrollbar(approval_table, orient=tk.VERTICAL, command=self.approval_tree.yview)
-        review_scroll_x = ttk.Scrollbar(approval_table, orient=tk.HORIZONTAL, command=self.approval_tree.xview)
-        self.approval_tree.configure(yscrollcommand=review_scroll_y.set, xscrollcommand=review_scroll_x.set)
-        review_scroll_y.grid(row=0, column=1, sticky="ns")
-        review_scroll_x.grid(row=1, column=0, sticky="ew")
-        approval_table.rowconfigure(0, weight=1)
-        approval_table.columnconfigure(0, weight=1)
-        self.approval_tree.bind("<Double-Button-1>", self.begin_approval_value_edit)
+        ttk.Button(review_frame, text="Open Review Summary", command=self.open_review_summary_window).pack(anchor="w", pady=(0, 2))
 
         raw_frame = ttk.LabelFrame(left_side, text="Raw JSON / diagnostics", padding=8)
         raw_frame.pack(fill=tk.BOTH, expand=True, pady=(10, 0))
@@ -640,6 +631,89 @@ class ExpenseReceiptDialog:
         ttk.Button(buttons, text="Export JSON", command=self.export_json).pack(side=tk.LEFT, padx=4)
         ttk.Button(buttons, text="Export CSV", command=self.export_csv).pack(side=tk.LEFT, padx=4)
         ttk.Button(buttons, text="Close", command=top.destroy).pack(side=tk.RIGHT, padx=4)
+
+    def open_review_summary_window(self) -> None:
+        if self.approval_window and self.approval_window.winfo_exists():
+            self.approval_window.lift()
+            self.approval_window.focus_set()
+            if self.last_result:
+                self.populate_approval_view(self.last_result)
+            return
+
+        review_top = tk.Toplevel(self.parent)
+        review_top.title("Expense Review Summary")
+        review_top.geometry("980x680")
+        review_top.transient(self.parent)
+        self.approval_window = review_top
+
+        scroll_canvas = tk.Canvas(review_top, highlightthickness=0)
+        scroll_y = ttk.Scrollbar(review_top, orient=tk.VERTICAL, command=scroll_canvas.yview)
+        scroll_x = ttk.Scrollbar(review_top, orient=tk.HORIZONTAL, command=scroll_canvas.xview)
+        scroll_canvas.configure(yscrollcommand=scroll_y.set, xscrollcommand=scroll_x.set)
+        scroll_canvas.grid(row=0, column=0, sticky="nsew")
+        scroll_y.grid(row=0, column=1, sticky="ns")
+        scroll_x.grid(row=1, column=0, sticky="ew")
+        review_top.rowconfigure(0, weight=1)
+        review_top.columnconfigure(0, weight=1)
+
+        frame = ttk.Frame(scroll_canvas, padding=12)
+        window_id = scroll_canvas.create_window((0, 0), window=frame, anchor=tk.NW)
+
+        def update_scroll_region(_event=None) -> None:
+            scroll_canvas.configure(scrollregion=scroll_canvas.bbox("all"))
+
+        def resize_scroll_window(event) -> None:
+            requested_width = frame.winfo_reqwidth()
+            scroll_canvas.itemconfigure(window_id, width=max(event.width, requested_width))
+
+        frame.bind("<Configure>", update_scroll_region)
+        scroll_canvas.bind("<Configure>", resize_scroll_window)
+
+        ttk.Label(
+            frame,
+            text="Review the extracted fields below. Double-click an extracted value to edit it before approving.",
+            foreground="#555555",
+            wraplength=920,
+            justify=tk.LEFT,
+        ).pack(anchor="w", pady=(0, 8))
+        ttk.Label(frame, textvariable=self.approval_status_var, font=("Segoe UI", 10, "bold")).pack(anchor="w", pady=(0, 8))
+
+        approval_table = ttk.Frame(frame)
+        approval_table.pack(fill=tk.BOTH, expand=True)
+        self.approval_tree = ttk.Treeview(approval_table, columns=("Field", "Value"), show="headings", height=24)
+        self.approval_tree.heading("Field", text="Field")
+        self.approval_tree.heading("Value", text="Extracted Value")
+        self.approval_tree.column("Field", width=220, anchor=tk.W)
+        self.approval_tree.column("Value", width=700, anchor=tk.W)
+        self.approval_tree.grid(row=0, column=0, sticky="nsew")
+        review_scroll_y = ttk.Scrollbar(approval_table, orient=tk.VERTICAL, command=self.approval_tree.yview)
+        review_scroll_x = ttk.Scrollbar(approval_table, orient=tk.HORIZONTAL, command=self.approval_tree.xview)
+        self.approval_tree.configure(yscrollcommand=review_scroll_y.set, xscrollcommand=review_scroll_x.set)
+        review_scroll_y.grid(row=0, column=1, sticky="ns")
+        review_scroll_x.grid(row=1, column=0, sticky="ew")
+        approval_table.rowconfigure(0, weight=1)
+        approval_table.columnconfigure(0, weight=1)
+        self.approval_tree.bind("<Double-Button-1>", self.begin_approval_value_edit)
+
+        button_row = ttk.Frame(frame)
+        button_row.pack(fill=tk.X, pady=(10, 0))
+        ttk.Button(button_row, text="Close", command=lambda: self.close_review_summary_window(review_top)).pack(side=tk.RIGHT, padx=4)
+
+        def on_close() -> None:
+            self.close_review_summary_window(review_top)
+
+        review_top.protocol("WM_DELETE_WINDOW", on_close)
+        if self.last_result:
+            self.populate_approval_view(self.last_result)
+
+    def close_review_summary_window(self, review_top: tk.Toplevel) -> None:
+        self.cancel_review_edit()
+        if self.approval_window is review_top:
+            self.approval_tree = None
+            self.approval_item_fields.clear()
+            self.approval_window = None
+        if review_top.winfo_exists():
+            review_top.destroy()
 
     def use_lm_studio_default(self) -> None:
         self.endpoint_var.set(DEFAULT_LM_STUDIO_ENDPOINT)
@@ -877,12 +951,13 @@ class ExpenseReceiptDialog:
 
     def show_extraction_result(self, result: ExpenseExtractionResult) -> None:
         self.write_result(result.to_json())
-        self.populate_approval_view(result)
         result.approval_status = "Pending Review"
         result.approved_at = ""
         self.approval_status_var.set(
             f"Pending Review — extracted {len(result.fields)} field(s) at {result.extracted_at}. Verify before approving."
         )
+        self.open_review_summary_window()
+        self.populate_approval_view(result)
         if self.approve_button:
             self.approve_button.configure(state="normal")
         if self.needs_correction_button:
