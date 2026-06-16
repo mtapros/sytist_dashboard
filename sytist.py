@@ -298,37 +298,37 @@ class SytistDashboard:
         control_frame = ttk.Frame(self.root, padding=10)
         control_frame.pack(fill=tk.X)
 
-        row1 = ttk.Frame(control_frame)
-        row1.pack(fill=tk.X, pady=2)
-
-        ttk.Button(row1, text="Load Offline .sql File", command=self.load_sql_file).pack(side=tk.LEFT, padx=5)
-        ttk.Button(row1, text="Connect to Live DB", command=self.open_db_dialog).pack(side=tk.LEFT, padx=5)
-
-        ttk.Separator(row1, orient=tk.VERTICAL).pack(side=tk.LEFT, padx=15, fill=tk.Y)
-        ttk.Button(row1, text="Generate Print Folders", command=self.generate_print_folders).pack(side=tk.LEFT, padx=5)
-
-        ttk.Separator(row1, orient=tk.VERTICAL).pack(side=tk.LEFT, padx=15, fill=tk.Y)
-        ttk.Button(row1, text="Printer Routing", command=self.configure_printer_routing).pack(side=tk.LEFT, padx=5)
-        ttk.Button(row1, text="Print Selected Orders", command=self.print_selected_orders).pack(side=tk.LEFT, padx=5)
-        ttk.Button(row1, text="Print Image Files", command=self.print_image_files).pack(side=tk.LEFT, padx=5)
-        ttk.Button(row1, text="Create Button Print", command=self.open_button_print_editor).pack(side=tk.LEFT, padx=5)
-        ttk.Button(row1, text="Print 4x6 Address", command=self.open_address_print_dialog).pack(side=tk.LEFT, padx=5)
-
-        ttk.Separator(row1, orient=tk.VERTICAL).pack(side=tk.LEFT, padx=15, fill=tk.Y)
-        ttk.Button(row1, text="USPS Setup", command=self.configure_usps).pack(side=tk.LEFT, padx=5)
-        ttk.Button(row1, text="USPS Ship Selected", command=self.open_usps_shipping_dialog).pack(side=tk.LEFT, padx=5)
-
-        ttk.Separator(row1, orient=tk.VERTICAL).pack(side=tk.LEFT, padx=15, fill=tk.Y)
-        ttk.Button(row1, text="Zoho Setup", command=self.configure_zoho).pack(side=tk.LEFT, padx=5)
-        ttk.Button(row1, text="Push Selected to Zoho", command=self.push_selected_to_zoho).pack(side=tk.LEFT, padx=5)
-
-        ttk.Separator(row1, orient=tk.VERTICAL).pack(side=tk.LEFT, padx=15, fill=tk.Y)
-        ttk.Label(row1, text="Website / Favorite:").pack(side=tk.LEFT, padx=(5, 5))
+        row_website = ttk.LabelFrame(control_frame, text="Website", padding=(6, 2))
+        row_website.pack(fill=tk.X, pady=2)
         self.domain_var = tk.StringVar(value=self.config["domain"])
-        self.domain_combo = ttk.Combobox(row1, textvariable=self.domain_var, width=35)
+        self.domain_combo = ttk.Combobox(row_website, textvariable=self.domain_var, width=35)
         self.domain_combo.pack(side=tk.LEFT, padx=5)
         self.domain_combo.bind("<<ComboboxSelected>>", self.on_domain_selected)
-        ttk.Button(row1, text="Save Favorite", command=self.save_domain_as_favorite).pack(side=tk.LEFT, padx=5)
+        ttk.Button(row_website, text="Save Favorite", command=self.save_domain_as_favorite).pack(side=tk.LEFT, padx=5)
+
+        row_database = ttk.LabelFrame(control_frame, text="Database", padding=(6, 2))
+        row_database.pack(fill=tk.X, pady=2)
+        ttk.Button(row_database, text="Load Offline .sql File", command=self.load_sql_file).pack(side=tk.LEFT, padx=5)
+        ttk.Button(row_database, text="Connect to Live DB", command=self.open_db_dialog).pack(side=tk.LEFT, padx=5)
+
+        row_printing = ttk.LabelFrame(control_frame, text="Printing", padding=(6, 2))
+        row_printing.pack(fill=tk.X, pady=2)
+        ttk.Button(row_printing, text="Generate Print Folders", command=self.generate_print_folders).pack(side=tk.LEFT, padx=5)
+        ttk.Button(row_printing, text="Printer Routing", command=self.configure_printer_routing).pack(side=tk.LEFT, padx=5)
+        ttk.Button(row_printing, text="Print Selected Orders", command=self.print_selected_orders).pack(side=tk.LEFT, padx=5)
+        ttk.Button(row_printing, text="Print Image Files", command=self.print_image_files).pack(side=tk.LEFT, padx=5)
+        ttk.Button(row_printing, text="Create Button Print", command=self.open_button_print_editor).pack(side=tk.LEFT, padx=5)
+        ttk.Button(row_printing, text="Print 4x6 Address", command=self.open_address_print_dialog).pack(side=tk.LEFT, padx=5)
+
+        row_usps = ttk.LabelFrame(control_frame, text="USPS", padding=(6, 2))
+        row_usps.pack(fill=tk.X, pady=2)
+        ttk.Button(row_usps, text="USPS Setup", command=self.configure_usps).pack(side=tk.LEFT, padx=5)
+        ttk.Button(row_usps, text="USPS Ship Selected", command=self.open_usps_shipping_dialog).pack(side=tk.LEFT, padx=5)
+
+        row_zoho = ttk.LabelFrame(control_frame, text="Zoho", padding=(6, 2))
+        row_zoho.pack(fill=tk.X, pady=2)
+        ttk.Button(row_zoho, text="Zoho Setup", command=self.configure_zoho).pack(side=tk.LEFT, padx=5)
+        ttk.Button(row_zoho, text="Push Selected to Zoho", command=self.push_selected_to_zoho).pack(side=tk.LEFT, padx=5)
 
         row2 = ttk.Frame(control_frame)
         row2.pack(fill=tk.X, pady=(10, 2))
