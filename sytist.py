@@ -330,6 +330,10 @@ class SytistDashboard:
         ttk.Button(row_zoho, text="Zoho Setup", command=self.configure_zoho).pack(side=tk.LEFT, padx=5)
         ttk.Button(row_zoho, text="Push Selected to Zoho", command=self.push_selected_to_zoho).pack(side=tk.LEFT, padx=5)
 
+        row_orders_menu = ttk.LabelFrame(control_frame, text="Orders", padding=(6, 2))
+        row_orders_menu.pack(fill=tk.X, pady=2)
+        ttk.Button(row_orders_menu, text="Orders", command=self.open_orders_window).pack(side=tk.LEFT, padx=5)
+
         row2 = ttk.Frame(control_frame)
         row2.pack(fill=tk.X, pady=(10, 2))
         ttk.Label(row2, text="Search Orders:").pack(side=tk.LEFT, padx=5)
@@ -550,6 +554,134 @@ class SytistDashboard:
                 or search_term in (order.status_name or "").lower()
             ]
         self.populate_orders()
+
+    def open_orders_window(self):
+        top = tk.Toplevel(self.root)
+        top.title("Orders")
+        top.geometry("1100x620")
+        top.transient(self.root)
+
+        outer = ttk.Frame(top, padding=10)
+        outer.pack(fill=tk.BOTH, expand=True)
+
+        toolbar = ttk.Frame(outer)
+        toolbar.pack(fill=tk.X, pady=(0, 6))
+        ttk.Label(toolbar, text="Search Orders:").pack(side=tk.LEFT, padx=5)
+        win_search_var = tk.StringVar()
+        ttk.Entry(toolbar, textvariable=win_search_var, width=30).pack(side=tk.LEFT, padx=5)
+        ttk.Separator(toolbar, orient=tk.VERTICAL).pack(side=tk.LEFT, padx=15, fill=tk.Y)
+        ttk.Button(toolbar, text="Mark Selected Reviewed", command=lambda: _mark_reviewed(True)).pack(side=tk.LEFT, padx=5)
+        ttk.Button(toolbar, text="Mark Selected Unreviewed", command=lambda: _mark_reviewed(False)).pack(side=tk.LEFT, padx=5)
+
+        tree_frame = ttk.LabelFrame(outer, text="Orders", padding=5)
+        tree_frame.pack(fill=tk.BOTH, expand=True)
+
+        win_tree = ttk.Treeview(
+            tree_frame,
+            columns=("Select", "ID", "Date", "Name", "Email", "Total", "Sytist", "Dashboard", "Issues"),
+            show="headings",
+        )
+        self.setup_tree_columns(
+            win_tree,
+            [
+                ("Select", "[ ]", 40),
+                ("ID", "Order ID", 80),
+                ("Date", "Order Date", 100),
+                ("Name", "Customer Name", 180),
+                ("Email", "Email", 200),
+                ("Total", "Total ($)", 85),
+                ("Sytist", "Sytist Status", 120),
+                ("Dashboard", "Dashboard Status", 130),
+                ("Issues", "Discrepancies", 100),
+            ],
+        )
+        scroll_y = ttk.Scrollbar(tree_frame, orient="vertical", command=win_tree.yview)
+        win_tree.configure(yscrollcommand=scroll_y.set)
+        win_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scroll_y.pack(side=tk.RIGHT, fill=tk.Y)
+        win_tree.tag_configure("reviewed", foreground="#1f7a1f")
+        win_tree.tag_configure("unreviewed", foreground="#b22222")
+
+        def _populate(orders_list):
+            win_tree.delete(*win_tree.get_children())
+            for order in orders_list:
+                checkbox = "[X]" if order.selected else "[ ]"
+                rec = self.reconcile_order(order)
+                state = self.get_order_state(order.id)
+                reviewed = bool(state.get("reviewed", False))
+                tags = ("reviewed",) if reviewed else ("unreviewed",)
+                win_tree.insert(
+                    "", tk.END,
+                    values=(
+                        checkbox,
+                        order.id,
+                        order.date or "",
+                        order.name,
+                        order.email,
+                        self.decimal_str(order.total),
+                        order.status_name or order.status_id,
+                        rec["dashboard_status"],
+                        len(rec["issues"]),
+                    ),
+                    tags=tags,
+                )
+
+        def _filter(*args):
+            search = win_search_var.get().lower()
+            if not search:
+                result = self.orders[:]
+            else:
+                result = [
+                    o for o in self.orders
+                    if search in o.id.lower()
+                    or search in o.name.lower()
+                    or search in o.email.lower()
+                    or search in (o.status_name or "").lower()
+                ]
+            _populate(result)
+
+        win_search_var.trace_add("write", _filter)
+
+        def _on_click(event):
+            region = win_tree.identify("region", event.x, event.y)
+            if region == "cell":
+                col = win_tree.identify_column(event.x)
+                item_id = win_tree.identify_row(event.y)
+                if col == "#1" and item_id:
+                    vals = list(win_tree.item(item_id, "values"))
+                    vals[0] = "[X]" if vals[0] == "[ ]" else "[ ]"
+                    win_tree.item(item_id, values=vals)
+                    order_id = str(vals[1])
+                    for order in self.orders:
+                        if order.id == order_id:
+                            order.selected = (vals[0] == "[X]")
+                            break
+
+        def _on_double_click(event):
+            item_id = win_tree.identify_row(event.y)
+            if not item_id:
+                return
+            order_id = str(win_tree.item(item_id, "values")[1])
+            self.open_order_detail_window(order_id)
+
+        def _mark_reviewed(reviewed: bool):
+            selected_ids = [o.id for o in self.orders if o.selected]
+            if not selected_ids:
+                messagebox.showinfo(
+                    "No Orders Selected",
+                    "Use the checkbox column to select one or more orders first.",
+                    parent=top,
+                )
+                return
+            for oid in selected_ids:
+                self.update_order_state(oid, reviewed=reviewed)
+            self.populate_orders()
+            _filter()
+
+        win_tree.bind("<Button-1>", _on_click)
+        win_tree.bind("<Double-1>", _on_double_click)
+
+        _populate(self.orders)
 
     def load_sql_file(self):
         filepath = filedialog.askopenfilename(filetypes=[("SQL/Zip Files", "*.sql *.zip"), ("SQL Files", "*.sql"), ("Zip Files", "*.zip")])
