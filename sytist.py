@@ -13,6 +13,7 @@ from decimal import Decimal, InvalidOperation
 from tkinter import colorchooser, filedialog, messagebox, simpledialog, ttk
 import tkinter.font as tkfont
 
+from action_log import ActionLogStore
 from config_store import ConfigStore
 from dashboard_state import DashboardStateStore
 from data_loader import HAS_MYSQL, SytistDataLoader
@@ -26,8 +27,10 @@ from printing_service import (
     BUTTON_PRINT_SIZE,
     HAS_PIL,
     HAS_WIN32,
+    PRODUCT_FOLDERS,
     PrintingService,
 )
+from product_type_manager import ACTION_CUSTOM, ACTION_PRINT_SIZE, ACTION_SKIP, ProductTypeManager
 from usps_service import USPSNotConfiguredError, USPSService, USPSServiceError
 from zoho_books import ZohoBooksClient, ZohoBooksError
 
@@ -46,6 +49,10 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 _KEYRING_SERVICE = "sytist_dashboard"
+
+# Unicode checkbox glyphs used in Treeview Select columns.
+_CB_UNCHECKED = "☐"
+_CB_CHECKED = "☑"
 
 DASHBOARD_STATUSES = [
     "New",
@@ -76,6 +83,9 @@ class SytistDashboard:
         self.usps_service = USPSService(self.config)
         self.export_service = ExportService(self.printing_service)
         self.dialogs = Dialogs(self.root)
+        # Shared SQLite database for action logs and product-type mappings.
+        self.action_log_store = ActionLogStore("sytist_actions.db")
+        self.product_type_manager = ProductTypeManager("sytist_actions.db")
 
         self.orders: list[Order] = []
         self.cart_items: list[CartItem] = []
@@ -292,7 +302,16 @@ class SytistDashboard:
             state["last_seen_payment_status"] = order.payment_status
         self.save_dashboard_state()
         self.filtered_orders = self.orders.copy()
-        self.populate_orders()
+        count = len(self.orders)
+        self._status_label.config(
+            text=f"Loaded {count} order{'s' if count != 1 else ''}. "
+                 "Click 'Open Orders Window' to browse and manage them."
+        )
+
+    def populate_orders(self):
+        # Orders are now managed exclusively in the dedicated Orders window.
+        # Use the Refresh button in that window to sync after state changes.
+        pass
 
     def setup_ui(self):
         control_frame = ttk.Frame(self.root, padding=10)
@@ -319,6 +338,7 @@ class SytistDashboard:
         ttk.Button(row_printing, text="Print Image Files", command=self.print_image_files).pack(side=tk.LEFT, padx=5)
         ttk.Button(row_printing, text="Create Button Print", command=self.open_button_print_editor).pack(side=tk.LEFT, padx=5)
         ttk.Button(row_printing, text="Print 4x6 Address", command=self.open_address_print_dialog).pack(side=tk.LEFT, padx=5)
+        ttk.Button(row_printing, text="Product Types", command=self.open_product_type_manager).pack(side=tk.LEFT, padx=5)
 
         row_usps = ttk.LabelFrame(control_frame, text="USPS", padding=(6, 2))
         row_usps.pack(fill=tk.X, pady=2)
@@ -332,87 +352,19 @@ class SytistDashboard:
 
         row_orders_menu = ttk.LabelFrame(control_frame, text="Orders", padding=(6, 2))
         row_orders_menu.pack(fill=tk.X, pady=2)
-        ttk.Button(row_orders_menu, text="Orders", command=self.open_orders_window).pack(side=tk.LEFT, padx=5)
+        ttk.Button(row_orders_menu, text="Open Orders Window", command=self.open_orders_window).pack(side=tk.LEFT, padx=5)
 
-        row2 = ttk.Frame(control_frame)
-        row2.pack(fill=tk.X, pady=(10, 2))
-        ttk.Label(row2, text="Search Orders:").pack(side=tk.LEFT, padx=5)
-        self.search_var = tk.StringVar()
-        self.search_var.trace_add("write", self.filter_orders)
-        ttk.Entry(row2, textvariable=self.search_var, width=30).pack(side=tk.LEFT, padx=5)
-        ttk.Separator(row2, orient=tk.VERTICAL).pack(side=tk.LEFT, padx=15, fill=tk.Y)
-        ttk.Button(row2, text="Mark Selected Reviewed", command=self.mark_selected_reviewed).pack(side=tk.LEFT, padx=5)
-        ttk.Button(row2, text="Mark Selected Unreviewed", command=self.mark_selected_unreviewed).pack(side=tk.LEFT, padx=5)
-
-        main_paned = ttk.PanedWindow(self.root, orient=tk.HORIZONTAL)
-        main_paned.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
-
-        left_paned = ttk.PanedWindow(main_paned, orient=tk.VERTICAL)
-        main_paned.add(left_paned, weight=3)
-
-        preview_frame = ttk.LabelFrame(main_paned, text="Image Preview", padding=10)
-        main_paned.add(preview_frame, weight=1)
-        self.preview_label = ttk.Label(
-            preview_frame,
-            text="Click a URL in the items table\nto preview the image.",
-            justify=tk.CENTER,
+        # Status / hint area
+        hint_frame = ttk.Frame(self.root, padding=(12, 8))
+        hint_frame.pack(fill=tk.BOTH, expand=True)
+        self._status_label = ttk.Label(
+            hint_frame,
+            text="Load orders via the Database section above, then click 'Open Orders Window' to manage them.",
+            foreground="#555555",
+            justify=tk.LEFT,
+            wraplength=900,
         )
-        self.preview_label.pack(fill=tk.BOTH, expand=True)
-
-        order_frame = ttk.LabelFrame(left_paned, text="Orders", padding=5)
-        left_paned.add(order_frame, weight=3)
-
-        self.tree_orders = ttk.Treeview(
-            order_frame,
-            columns=("Select", "ID", "Name", "Email", "Total", "Sytist", "Dashboard", "Issues"),
-            show="headings",
-        )
-        self.setup_tree_columns(
-            self.tree_orders,
-            [
-                ("Select", "[ ]", 40),
-                ("ID", "Order ID", 80),
-                ("Name", "Customer Name", 190),
-                ("Email", "Email", 220),
-                ("Total", "Total ($)", 85),
-                ("Sytist", "Sytist Status", 130),
-                ("Dashboard", "Dashboard Status", 130),
-                ("Issues", "Discrepancies", 100),
-            ],
-        )
-
-        order_scroll_y = ttk.Scrollbar(order_frame, orient="vertical", command=self.tree_orders.yview)
-        self.tree_orders.configure(yscrollcommand=order_scroll_y.set)
-        self.tree_orders.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        order_scroll_y.pack(side=tk.RIGHT, fill=tk.Y)
-        self.tree_orders.tag_configure("reviewed", foreground="#1f7a1f")
-        self.tree_orders.tag_configure("unreviewed", foreground="#b22222")
-        self.tree_orders.bind("<Button-1>", self.on_order_click)
-        self.tree_orders.bind("<<TreeviewSelect>>", self.on_order_select)
-        self.tree_orders.bind("<Double-1>", self.on_order_double_click)
-
-        items_frame = ttk.LabelFrame(left_paned, text="Order Items", padding=5)
-        left_paned.add(items_frame, weight=2)
-
-        self.tree_items = ttk.Treeview(
-            items_frame,
-            columns=("Product", "Qty", "Price", "File", "URL"),
-            show="headings",
-        )
-        self.setup_tree_columns(
-            self.tree_items,
-            [("Product", "Product", 160), ("Qty", "Qty", 40),
-             ("Price", "Price ($)", 70), ("File", "File Name", 170),
-             ("URL", "Image URL (Click to Preview)", 320)],
-        )
-
-        items_scroll_y = ttk.Scrollbar(items_frame, orient="vertical", command=self.tree_items.yview)
-        items_scroll_x = ttk.Scrollbar(items_frame, orient="horizontal", command=self.tree_items.xview)
-        self.tree_items.configure(yscrollcommand=items_scroll_y.set, xscrollcommand=items_scroll_x.set)
-        self.tree_items.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
-        items_scroll_x.pack(side=tk.BOTTOM, fill=tk.X)
-        items_scroll_y.pack(side=tk.RIGHT, fill=tk.Y)
-        self.tree_items.bind("<Button-1>", self.on_item_click)
+        self._status_label.pack(anchor="nw")
 
     def setup_tree_columns(self, tree, columns):
         numeric_cols = {"Qty", "Total", "Price", "Issues"}
@@ -447,88 +399,84 @@ class SytistDashboard:
             on_save=on_save,
         )
 
-    def on_order_click(self, event):
-        region = self.tree_orders.identify("region", event.x, event.y)
-        if region == "cell":
-            column = self.tree_orders.identify_column(event.x)
-            item_id = self.tree_orders.identify_row(event.y)
-            if column == '#1' and item_id:
-                values = list(self.tree_orders.item(item_id, "values"))
-                values[0] = "[X]" if values[0] == "[ ]" else "[ ]"
-                self.tree_orders.item(item_id, values=values)
-                order_id = str(values[1])
-                for order in self.orders:
-                    if order.id == order_id:
-                        order.selected = (values[0] == "[X]")
-                        break
-
-    def on_order_double_click(self, event):
-        item_id = self.tree_orders.identify_row(event.y)
-        if not item_id:
+    def open_image_preview_window(self, url: str) -> None:
+        """Open a dedicated Toplevel window to preview an image URL."""
+        if not url:
             return
-        order_id = str(self.tree_orders.item(item_id, "values")[1])
-        self.open_order_detail_window(order_id)
-
-    def on_item_click(self, event):
-        region = self.tree_items.identify("region", event.x, event.y)
-        if region == "cell":
-            column = self.tree_items.identify_column(event.x)
-            if column == '#5':
-                item_id = self.tree_items.identify_row(event.y)
-                if item_id:
-                    url = self.tree_items.item(item_id, "values")[4]
-                    if str(url).startswith("http"):
-                        self.load_preview_image(str(url))
-
-    def load_preview_image(self, url):
         if not HAS_PIL or Image is None or ImageTk is None:
-            messagebox.showerror("Missing Library", "Please run 'pip install pillow' to enable image previews.")
+            messagebox.showerror(
+                "Missing Library",
+                "Please run 'pip install pillow' to enable image previews.",
+            )
             return
-        self.preview_label.config(text="Fetching image...", image="")
-        threading.Thread(target=self._fetch_and_display_image, args=(url,), daemon=True).start()
 
-    def _fetch_and_display_image(self, url):
-        import ssl
-        try:
-            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+        win = tk.Toplevel(self.root)
+        win.title("Image Preview")
+        win.geometry("660x700")
+        win.transient(self.root)
+
+        outer = ttk.Frame(win, padding=10)
+        outer.pack(fill=tk.BOTH, expand=True)
+
+        url_label = ttk.Label(
+            outer,
+            text=url,
+            foreground="blue",
+            cursor="hand2",
+            wraplength=620,
+            justify=tk.LEFT,
+        )
+        url_label.pack(fill=tk.X, pady=(0, 6))
+        url_label.bind("<Button-1>", lambda e: webbrowser.open(url))
+
+        img_label = ttk.Label(outer, text="Loading image…", justify=tk.CENTER)
+        img_label.pack(fill=tk.BOTH, expand=True)
+
+        def _fetch():
+            import ssl
             try:
-                with urllib.request.urlopen(req, timeout=30) as response:
-                    raw_data = response.read()
-            except ssl.SSLError:
-                ctx = ssl.create_default_context()
-                ctx.check_hostname = False
-                ctx.verify_mode = ssl.CERT_NONE
-                with urllib.request.urlopen(req, context=ctx, timeout=30) as response:
-                    raw_data = response.read()
-            image = Image.open(io.BytesIO(raw_data))
-            image.thumbnail((450, 450), Image.Resampling.LANCZOS)
-            photo = ImageTk.PhotoImage(image)
-            self.root.after(0, lambda p=photo: self._update_preview_label(p))
-        except Exception as e:
-            err_msg = str(e)
-            self.root.after(0, lambda msg=err_msg: self.preview_label.config(text=f"Failed to load image.\n{msg}", image=""))
+                req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+                try:
+                    with urllib.request.urlopen(req, timeout=30) as resp:
+                        raw = resp.read()
+                except ssl.SSLError:
+                    ctx = ssl.create_default_context()
+                    ctx.check_hostname = False
+                    ctx.verify_mode = ssl.CERT_NONE
+                    with urllib.request.urlopen(req, context=ctx, timeout=30) as resp:
+                        raw = resp.read()
+                img = Image.open(io.BytesIO(raw))
+                img.thumbnail((600, 600), Image.Resampling.LANCZOS)
+                photo = ImageTk.PhotoImage(img)
 
-    def _update_preview_label(self, photo):
-        self.preview_label.config(image=photo, text="")
-        self.preview_label.image = photo
+                def _show(p=photo):
+                    img_label.config(image=p, text="")
+                    img_label.image = p
+
+                win.after(0, _show)
+            except Exception as exc:
+                msg = str(exc)
+                win.after(0, lambda m=msg: img_label.config(text=f"Failed to load image.\n{m}", image=""))
+
+        threading.Thread(target=_fetch, daemon=True).start()
 
     def sort_treeview(self, tree, col, reverse):
         if col == "Select":
             all_selected = True
             for child in tree.get_children():
-                if tree.item(child, "values")[0] == "[ ]":
+                if tree.item(child, "values")[0] == _CB_UNCHECKED:
                     all_selected = False
                     break
 
-            new_val = "[ ]" if all_selected else "[X]"
+            new_val = _CB_UNCHECKED if all_selected else _CB_CHECKED
             for child in tree.get_children():
                 vals = list(tree.item(child, "values"))
                 vals[0] = new_val
                 tree.item(child, values=vals)
                 for order in self.orders:
                     if order.id == str(vals[1]):
-                        order.selected = (new_val == "[X]")
-            tree.heading("Select", text="[X]" if not all_selected else "[ ]")
+                        order.selected = (new_val == _CB_CHECKED)
+            tree.heading("Select", text=_CB_CHECKED if not all_selected else _CB_UNCHECKED)
             return
 
         items = [(tree.set(k, col), k) for k in tree.get_children('')]
@@ -541,24 +489,10 @@ class SytistDashboard:
             tree.move(k, '', index)
         tree.heading(col, command=lambda: self.sort_treeview(tree, col, not reverse))
 
-    def filter_orders(self, *args):
-        search_term = self.search_var.get().lower()
-        if search_term == "":
-            self.filtered_orders = self.orders.copy()
-        else:
-            self.filtered_orders = [
-                order for order in self.orders
-                if search_term in order.id.lower()
-                or search_term in order.name.lower()
-                or search_term in order.email.lower()
-                or search_term in (order.status_name or "").lower()
-            ]
-        self.populate_orders()
-
     def open_orders_window(self):
         top = tk.Toplevel(self.root)
         top.title("Orders")
-        top.geometry("1100x620")
+        top.geometry("1300x750")
         top.transient(self.root)
 
         outer = ttk.Frame(top, padding=10)
@@ -572,19 +506,25 @@ class SytistDashboard:
         ttk.Separator(toolbar, orient=tk.VERTICAL).pack(side=tk.LEFT, padx=15, fill=tk.Y)
         ttk.Button(toolbar, text="Mark Selected Reviewed", command=lambda: _mark_reviewed(True)).pack(side=tk.LEFT, padx=5)
         ttk.Button(toolbar, text="Mark Selected Unreviewed", command=lambda: _mark_reviewed(False)).pack(side=tk.LEFT, padx=5)
+        ttk.Button(toolbar, text="Refresh", command=lambda: _populate(self.orders)).pack(side=tk.LEFT, padx=5)
 
-        tree_frame = ttk.LabelFrame(outer, text="Orders", padding=5)
-        tree_frame.pack(fill=tk.BOTH, expand=True)
+        # Vertical split: orders list on top, order items on bottom
+        vpaned = ttk.PanedWindow(outer, orient=tk.VERTICAL)
+        vpaned.pack(fill=tk.BOTH, expand=True)
+
+        # ── Orders tree ─────────────────────────────────────────────
+        orders_frame = ttk.LabelFrame(vpaned, text="Orders", padding=5)
+        vpaned.add(orders_frame, weight=3)
 
         win_tree = ttk.Treeview(
-            tree_frame,
+            orders_frame,
             columns=("Select", "ID", "Date", "Name", "Email", "Total", "Sytist", "Dashboard", "Issues"),
             show="headings",
         )
         self.setup_tree_columns(
             win_tree,
             [
-                ("Select", "[ ]", 40),
+                ("Select", _CB_UNCHECKED, 36),
                 ("ID", "Order ID", 80),
                 ("Date", "Order Date", 100),
                 ("Name", "Customer Name", 180),
@@ -595,17 +535,58 @@ class SytistDashboard:
                 ("Issues", "Discrepancies", 100),
             ],
         )
-        scroll_y = ttk.Scrollbar(tree_frame, orient="vertical", command=win_tree.yview)
+        scroll_y = ttk.Scrollbar(orders_frame, orient="vertical", command=win_tree.yview)
         win_tree.configure(yscrollcommand=scroll_y.set)
         win_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scroll_y.pack(side=tk.RIGHT, fill=tk.Y)
         win_tree.tag_configure("reviewed", foreground="#1f7a1f")
         win_tree.tag_configure("unreviewed", foreground="#b22222")
 
+        # ── Order Items tree ─────────────────────────────────────────
+        items_frame = ttk.LabelFrame(vpaned, text="Order Items", padding=5)
+        vpaned.add(items_frame, weight=2)
+
+        win_items = ttk.Treeview(
+            items_frame,
+            columns=("Product", "Qty", "Price", "File", "URL"),
+            show="headings",
+        )
+        self.setup_tree_columns(
+            win_items,
+            [
+                ("Product", "Product", 160),
+                ("Qty", "Qty", 40),
+                ("Price", "Price ($)", 70),
+                ("File", "File Name", 170),
+                ("URL", "Image URL (Click to Preview)", 320),
+            ],
+        )
+        items_scroll_y = ttk.Scrollbar(items_frame, orient="vertical", command=win_items.yview)
+        items_scroll_x = ttk.Scrollbar(items_frame, orient="horizontal", command=win_items.xview)
+        win_items.configure(yscrollcommand=items_scroll_y.set, xscrollcommand=items_scroll_x.set)
+        win_items.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+        items_scroll_x.pack(side=tk.BOTTOM, fill=tk.X)
+        items_scroll_y.pack(side=tk.RIGHT, fill=tk.Y)
+
+        # ── Closures ────────────────────────────────────────────────
+
+        def _populate_items(order_id: str):
+            domain = self.domain_var.get().rstrip("/")
+            win_items.delete(*win_items.get_children())
+            for item in self.cart_items:
+                if item.order_id == order_id and item.product:
+                    url = ""
+                    photo = self.photo_paths.get(str(item.pic_id))
+                    if photo:
+                        candidates = self.export_service._photo_url_candidates(domain, photo)
+                        if candidates:
+                            url = candidates[0]
+                    win_items.insert("", tk.END, values=(item.product, item.qty, item.price, item.file, url))
+
         def _populate(orders_list):
             win_tree.delete(*win_tree.get_children())
             for order in orders_list:
-                checkbox = "[X]" if order.selected else "[ ]"
+                checkbox = _CB_CHECKED if order.selected else _CB_UNCHECKED
                 rec = self.reconcile_order(order)
                 state = self.get_order_state(order.id)
                 reviewed = bool(state.get("reviewed", False))
@@ -649,13 +630,20 @@ class SytistDashboard:
                 item_id = win_tree.identify_row(event.y)
                 if col == "#1" and item_id:
                     vals = list(win_tree.item(item_id, "values"))
-                    vals[0] = "[X]" if vals[0] == "[ ]" else "[ ]"
+                    vals[0] = _CB_CHECKED if vals[0] == _CB_UNCHECKED else _CB_UNCHECKED
                     win_tree.item(item_id, values=vals)
                     order_id = str(vals[1])
                     for order in self.orders:
                         if order.id == order_id:
-                            order.selected = (vals[0] == "[X]")
+                            order.selected = (vals[0] == _CB_CHECKED)
                             break
+
+        def _on_select(event):
+            selected = win_tree.selection()
+            if not selected:
+                return
+            order_id = str(win_tree.item(selected[0])["values"][1])
+            _populate_items(order_id)
 
         def _on_double_click(event):
             item_id = win_tree.identify_row(event.y)
@@ -664,80 +652,35 @@ class SytistDashboard:
             order_id = str(win_tree.item(item_id, "values")[1])
             self.open_order_detail_window(order_id)
 
+        def _on_item_click(event):
+            region = win_items.identify("region", event.x, event.y)
+            if region == "cell":
+                col = win_items.identify_column(event.x)
+                item_id = win_items.identify_row(event.y)
+                if col == "#5" and item_id:
+                    url = win_items.item(item_id, "values")[4]
+                    if str(url).startswith("http"):
+                        self.open_image_preview_window(str(url))
+
         def _mark_reviewed(reviewed: bool):
             selected_ids = [o.id for o in self.orders if o.selected]
             if not selected_ids:
                 messagebox.showinfo(
                     "No Orders Selected",
-                    "Use the checkbox column to select one or more orders first.",
+                    "Use the checkbox column (☐) to select one or more orders first.",
                     parent=top,
                 )
                 return
             for oid in selected_ids:
                 self.update_order_state(oid, reviewed=reviewed)
-            self.populate_orders()
             _filter()
 
         win_tree.bind("<Button-1>", _on_click)
+        win_tree.bind("<<TreeviewSelect>>", _on_select)
         win_tree.bind("<Double-1>", _on_double_click)
+        win_items.bind("<Button-1>", _on_item_click)
 
         _populate(self.orders)
-
-    def load_sql_file(self):
-        filepath = filedialog.askopenfilename(filetypes=[("SQL/Zip Files", "*.sql *.zip"), ("SQL Files", "*.sql"), ("Zip Files", "*.zip")])
-        if not filepath:
-            return
-        try:
-            orders, cart_items, photo_paths, status_lookup = self.data_loader.load_sql_dump(filepath)
-            self.set_data(orders, cart_items, photo_paths, status_lookup)
-            messagebox.showinfo("Success", f"Loaded {len(self.orders)} orders from local file!")
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to parse file: {e}")
-
-    def populate_orders(self):
-        self.tree_orders.delete(*self.tree_orders.get_children())
-        for order in self.filtered_orders:
-            checkbox = "[X]" if order.selected else "[ ]"
-            rec = self.reconcile_order(order)
-            issue_count = len(rec["issues"])
-            state = self.get_order_state(order.id)
-            reviewed = bool(state.get("reviewed", False))
-            tags = ("reviewed",) if reviewed else ("unreviewed",)
-            self.tree_orders.insert(
-                "",
-                tk.END,
-                values=(
-                    checkbox,
-                    order.id,
-                    order.name,
-                    order.email,
-                    self.decimal_str(order.total),
-                    order.status_name or order.status_id,
-                    rec["dashboard_status"],
-                    issue_count,
-                ),
-                tags=tags,
-            )
-
-    def on_order_select(self, event):
-        selected = self.tree_orders.selection()
-        if not selected:
-            return
-        order_id = str(self.tree_orders.item(selected[0])["values"][1])
-        self.populate_order_items(order_id)
-
-    def populate_order_items(self, order_id: str):
-        domain = self.domain_var.get().rstrip('/')
-        self.tree_items.delete(*self.tree_items.get_children())
-        for item in self.cart_items:
-            if item.order_id == order_id and item.product:
-                url = ""
-                photo = self.photo_paths.get(str(item.pic_id))
-                if photo:
-                    candidates = self.export_service._photo_url_candidates(domain, photo)
-                    if candidates:
-                        url = candidates[0]
-                self.tree_items.insert("", tk.END, values=(item.product, item.qty, item.price, item.file, url))
 
     def get_selected_order_ids(self):
         selected_ids = []
@@ -749,14 +692,13 @@ class SytistDashboard:
     def set_reviewed_for_selected_orders(self, reviewed: bool):
         selected_ids = self.get_selected_order_ids()
         if not selected_ids:
-            messagebox.showinfo("No Orders Selected", "Use the checkbox column to select one or more orders first.")
+            messagebox.showinfo(
+                "No Orders Selected",
+                "Use the checkbox column (☐) in the Orders window to select one or more orders first.",
+            )
             return
         for order_id in selected_ids:
             self.update_order_state(order_id, reviewed=reviewed)
-        self.populate_orders()
-        current = self.tree_orders.selection()
-        if current:
-            self.on_order_select(None)
 
     def mark_selected_reviewed(self):
         self.set_reviewed_for_selected_orders(True)
@@ -896,7 +838,9 @@ class SytistDashboard:
             return
         rec = self.reconcile_order(order)
         state = self.get_order_state(order.id)
-        self.populate_order_items(order.id)
+
+        # Log that this order was viewed.
+        self.action_log_store.log_action(order.id, "viewed")
 
         top = tk.Toplevel(self.root)
         top.title(f"Order Detail - {order.id}")
@@ -940,9 +884,10 @@ class SytistDashboard:
         notes_box.insert("1.0", state.get("notes", ""))
 
         def save_dashboard_fields():
+            new_status = dash_status_var.get()
             self.update_order_state(
                 order.id,
-                dashboard_status=dash_status_var.get(),
+                dashboard_status=new_status,
                 reviewed=bool(reviewed_var.get()),
                 flagged=bool(flagged_var.get()),
                 notes=notes_box.get("1.0", "end").strip(),
@@ -950,7 +895,7 @@ class SytistDashboard:
                 last_seen_sytist_status_name=order.status_name,
                 last_seen_payment_status=order.payment_status,
             )
-            self.populate_orders()
+            self.action_log_store.log_action(order.id, "status_updated", f"dashboard_status={new_status}")
             messagebox.showinfo("Saved", f"Saved dashboard state for order {order.id}.", parent=top)
 
         ttk.Button(status_frame, text="Save Dashboard Status", command=save_dashboard_fields).grid(row=4, column=3, sticky="e", padx=6, pady=6)
@@ -1034,7 +979,7 @@ class SytistDashboard:
         payment.columnconfigure(1, weight=1)
 
         item_tree = ttk.Treeview(items, columns=("Product", "Qty", "Price", "File"), show="headings", height=16)
-        for col, heading, width in [("Product", "Product", 170), ("Qty", "Qty", 50), ("Price", "Price", 70), ("File", "File", 220)]:
+        for col, heading, width in [("Product", "Product", 170), ("Qty", "Qty", 50), ("Price", "Price", 70), ("File", "File (click to preview)", 220)]:
             item_tree.heading(col, text=heading)
             item_tree.column(col, width=width, anchor=tk.W if col in {"Product", "File"} else tk.E)
         item_tree.pack(fill=tk.BOTH, expand=True)
@@ -1043,9 +988,24 @@ class SytistDashboard:
         for item, url in item_urls:
             item_tree.insert("", tk.END, values=(item.product, item.qty, item.price, item.file))
 
+        def _on_detail_item_click(event):
+            region = item_tree.identify("region", event.x, event.y)
+            if region == "cell":
+                col = item_tree.identify_column(event.x)
+                row_id = item_tree.identify_row(event.y)
+                if col == "#4" and row_id:
+                    idx = item_tree.index(row_id)
+                    if 0 <= idx < len(item_urls):
+                        _, url = item_urls[idx]
+                        if url:
+                            self.open_image_preview_window(url)
+
+        item_tree.bind("<Button-1>", _on_detail_item_click)
+
         btn_row = ttk.Frame(items)
         btn_row.pack(fill=tk.X, pady=(8, 0))
         ttk.Button(btn_row, text="Preview Selected Image", command=lambda: self.preview_selected_detail_item(item_tree, item_urls)).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btn_row, text="Action Log", command=lambda: self._open_order_action_log(order.id, top)).pack(side=tk.LEFT, padx=4)
         ttk.Button(btn_row, text="Close", command=top.destroy).pack(side=tk.RIGHT, padx=4)
 
     def preview_selected_detail_item(self, item_tree, item_urls):
@@ -1056,7 +1016,42 @@ class SytistDashboard:
         if 0 <= index < len(item_urls):
             _, url = item_urls[index]
             if url:
-                self.load_preview_image(url)
+                self.open_image_preview_window(url)
+
+    def _open_order_action_log(self, order_id: str, parent=None) -> None:
+        """Open a small window showing the action log for *order_id*."""
+        entries = self.action_log_store.get_actions_for_order(order_id)
+
+        win = tk.Toplevel(parent or self.root)
+        win.title(f"Action Log — Order {order_id}")
+        win.geometry("600x360")
+        win.transient(parent or self.root)
+
+        outer = ttk.Frame(win, padding=10)
+        outer.pack(fill=tk.BOTH, expand=True)
+
+        ttk.Label(outer, text=f"Logged actions for order {order_id}:").pack(anchor="w", pady=(0, 4))
+
+        log_tree = ttk.Treeview(outer, columns=("Timestamp", "Action", "Details"), show="headings", height=14)
+        for col, heading, width in [
+            ("Timestamp", "Timestamp", 160),
+            ("Action", "Action", 140),
+            ("Details", "Details", 260),
+        ]:
+            log_tree.heading(col, text=heading)
+            log_tree.column(col, width=width, anchor=tk.W)
+        scroll = ttk.Scrollbar(outer, orient="vertical", command=log_tree.yview)
+        log_tree.configure(yscrollcommand=scroll.set)
+        log_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scroll.pack(side=tk.RIGHT, fill=tk.Y)
+
+        if entries:
+            for ts, action_type, details in entries:
+                log_tree.insert("", tk.END, values=(ts, action_type, details))
+        else:
+            ttk.Label(outer, text="No actions recorded yet.", foreground="#888888").pack(pady=6)
+
+        ttk.Button(outer, text="Close", command=win.destroy).pack(pady=(6, 0))
 
     def generate_print_folders(self):
         selected_orders = [order for order in self.orders if order.selected]
@@ -1064,12 +1059,22 @@ class SytistDashboard:
             messagebox.showwarning("No Orders", "Please select at least one order.")
             return
 
+        # Detect and handle unknown product types before proceeding.
+        unknown = self._collect_unknown_product_types(selected_orders)
+        if unknown and not self._prompt_define_product_types(unknown):
+            return  # user cancelled
+
         base_dir = filedialog.askdirectory(title="Select Destination Folder")
         if not base_dir:
             return
 
         self.save_current_domain_to_selected_preset()
         self.save_config()
+
+        # Log the action for each selected order.
+        self.action_log_store.log_actions_bulk(
+            [(o.id, "folders_generated", base_dir) for o in selected_orders]
+        )
 
         # Capture the domain on the main thread before handing off to a worker.
         domain = self.domain_var.get().rstrip('/')
@@ -1135,6 +1140,134 @@ class SytistDashboard:
 
         self.root.after(0, _finish)
 
+    def _get_effective_size_key(self, product_name: str) -> str | None:
+        """Resolve a size key for *product_name*, consulting the product type manager."""
+        size_key = self.printing_service.detect_size_key_from_text(product_name)
+        if size_key:
+            return size_key
+        mapping = self.product_type_manager.get_mapping(product_name)
+        if mapping:
+            if mapping["action"] == ACTION_SKIP:
+                return None
+            if mapping["action"] == ACTION_PRINT_SIZE:
+                return mapping["value"] or None
+        return None
+
+    def _get_effective_folder(self, product_name: str) -> str | None:
+        """Resolve the destination folder for *product_name*, consulting the product type manager."""
+        folder = self.printing_service.determine_folder(product_name)
+        if folder != "Other_Prints":
+            return folder
+        mapping = self.product_type_manager.get_mapping(product_name)
+        if mapping:
+            if mapping["action"] == ACTION_SKIP:
+                return None
+            if mapping["action"] == ACTION_PRINT_SIZE:
+                return PRODUCT_FOLDERS.get(mapping["value"], mapping["value"] or "Other_Prints")
+            if mapping["action"] == ACTION_CUSTOM:
+                return mapping["value"] or "Other_Prints"
+        return "Other_Prints"
+
+    def _collect_unknown_product_types(self, selected_orders) -> set:
+        """Return product names from *selected_orders* that have no known classification."""
+        unknown: set = set()
+        for order in selected_orders:
+            for item in self.cart_items:
+                if item.order_id == order.id and item.product and _safe_qty(item.qty) > 0:
+                    product = str(item.product).strip()
+                    if not product:
+                        continue
+                    if self.printing_service.detect_size_key_from_text(product):
+                        continue
+                    if self.product_type_manager.is_mapped(product):
+                        continue
+                    unknown.add(product)
+        return unknown
+
+    def _prompt_define_product_types(self, unknown_types: set, parent=None) -> bool:
+        """Show a dialog for the user to map each unknown product type.
+        Returns True if the user saved all mappings, False if cancelled."""
+        if not unknown_types:
+            return True
+
+        KNOWN_SIZES = ["4x6", "4x5", "5x7", "8x10", "wallet", "button", "magnet", "7in", "10in"]
+        ACTION_LABELS = [f"Print: {s}" for s in KNOWN_SIZES] + ["skip", "custom label…"]
+
+        parent = parent or self.root
+        top = tk.Toplevel(parent)
+        top.title("Unknown Product Types")
+        top.geometry("680x460")
+        top.transient(parent)
+        top.grab_set()
+
+        outer = ttk.Frame(top, padding=10)
+        outer.pack(fill=tk.BOTH, expand=True)
+
+        ttk.Label(
+            outer,
+            text="The following product types are not yet configured.\n"
+                 "Choose an action for each, then click Save & Continue.",
+            wraplength=640,
+        ).pack(fill=tk.X, pady=(0, 10))
+
+        canvas = tk.Canvas(outer, borderwidth=0)
+        vsb = ttk.Scrollbar(outer, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=vsb.set)
+        vsb.pack(side=tk.RIGHT, fill=tk.Y)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        rows_frame = ttk.Frame(canvas)
+        canvas.create_window((0, 0), window=rows_frame, anchor="nw")
+        rows_frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+
+        row_vars: dict[str, tuple[tk.StringVar, tk.StringVar]] = {}
+        for i, product_type in enumerate(sorted(unknown_types)):
+            ttk.Label(rows_frame, text=product_type, width=34, anchor="w").grid(row=i, column=0, sticky="w", padx=4, pady=4)
+            action_var = tk.StringVar(value="skip")
+            ttk.Combobox(rows_frame, textvariable=action_var, values=ACTION_LABELS, state="readonly", width=20).grid(row=i, column=1, padx=4, pady=4)
+            custom_var = tk.StringVar()
+            ttk.Entry(rows_frame, textvariable=custom_var, width=18).grid(row=i, column=2, padx=4, pady=4)
+            ttk.Label(rows_frame, text="← custom label", foreground="#888888", font=("", 8)).grid(row=i, column=3, sticky="w", padx=2)
+            row_vars[product_type] = (action_var, custom_var)
+
+        result = {"ok": False}
+
+        def on_save():
+            for product_type, (action_var, custom_var) in row_vars.items():
+                chosen = action_var.get()
+                custom = custom_var.get().strip()
+                if custom:
+                    self.product_type_manager.set_mapping(product_type, ACTION_CUSTOM, custom)
+                elif chosen == "skip":
+                    self.product_type_manager.set_mapping(product_type, ACTION_SKIP)
+                elif chosen.startswith("Print: "):
+                    size = chosen[len("Print: "):]
+                    self.product_type_manager.set_mapping(product_type, ACTION_PRINT_SIZE, size)
+                elif chosen == "custom label…":
+                    label = simpledialog.askstring(
+                        "Custom Label",
+                        f"Enter a folder/label name for:\n{product_type}",
+                        parent=top,
+                    )
+                    if label and label.strip():
+                        self.product_type_manager.set_mapping(product_type, ACTION_CUSTOM, label.strip())
+                    else:
+                        self.product_type_manager.set_mapping(product_type, ACTION_SKIP)
+                else:
+                    self.product_type_manager.set_mapping(product_type, ACTION_SKIP)
+            result["ok"] = True
+            top.destroy()
+
+        def on_cancel():
+            top.destroy()
+
+        btn_row = ttk.Frame(outer)
+        btn_row.pack(fill=tk.X, pady=(10, 0), side=tk.BOTTOM)
+        ttk.Button(btn_row, text="Save & Continue", command=on_save).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btn_row, text="Cancel", command=on_cancel).pack(side=tk.LEFT, padx=4)
+
+        top.wait_window()
+        return result["ok"]
+
     def build_order_print_jobs(self, selected_orders):
         jobs = []
         domain = self.domain_var.get().rstrip('/')
@@ -1148,7 +1281,10 @@ class SytistDashboard:
                 if not candidates:
                     continue
                 url = candidates[0]
-                size_key = self.printing_service.detect_size_key_for_order_item(item)
+                size_key = (
+                    self.printing_service.detect_size_key_for_order_item(item)
+                    or self._get_effective_size_key(item.product)
+                )
                 qty = max(1, int(_safe_qty(item.qty)))
                 for _ in range(qty):
                     jobs.append(PrintJob(
@@ -1170,8 +1306,164 @@ class SytistDashboard:
             messagebox.showwarning("No Orders", "Please select at least one order.")
             return
 
+        # Detect and handle unknown product types before proceeding.
+        unknown = self._collect_unknown_product_types(selected_orders)
+        if unknown and not self._prompt_define_product_types(unknown):
+            return
+
+        # Log the print action for each selected order.
+        self.action_log_store.log_actions_bulk(
+            [(o.id, "printed", "order print") for o in selected_orders]
+        )
+
         jobs = self.build_order_print_jobs(selected_orders)
         self.start_print_workflow(jobs, "Order Print")
+
+    def open_product_type_manager(self) -> None:
+        """Open the Product Type Manager dialog for viewing and editing all mappings."""
+        KNOWN_SIZES = ["4x6", "4x5", "5x7", "8x10", "wallet", "button", "magnet", "7in", "10in"]
+
+        top = tk.Toplevel(self.root)
+        top.title("Product Type Manager")
+        top.geometry("700x460")
+        top.transient(self.root)
+
+        outer = ttk.Frame(top, padding=10)
+        outer.pack(fill=tk.BOTH, expand=True)
+
+        ttk.Label(
+            outer,
+            text="Define how each product type is handled during printing and folder generation.\n"
+                 "Unknown types will be detected automatically and you will be prompted to map them.",
+            wraplength=660,
+            justify=tk.LEFT,
+        ).pack(fill=tk.X, pady=(0, 8))
+
+        # Mapping table
+        tree_frame = ttk.Frame(outer)
+        tree_frame.pack(fill=tk.BOTH, expand=True)
+
+        mapping_tree = ttk.Treeview(
+            tree_frame,
+            columns=("ProductType", "Action", "Value", "UpdatedAt"),
+            show="headings",
+            height=14,
+        )
+        for col, heading, width in [
+            ("ProductType", "Product Type", 220),
+            ("Action", "Action", 100),
+            ("Value", "Size / Label", 130),
+            ("UpdatedAt", "Updated", 140),
+        ]:
+            mapping_tree.heading(col, text=heading)
+            mapping_tree.column(col, width=width, anchor=tk.W)
+        msb = ttk.Scrollbar(tree_frame, orient="vertical", command=mapping_tree.yview)
+        mapping_tree.configure(yscrollcommand=msb.set)
+        mapping_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        msb.pack(side=tk.RIGHT, fill=tk.Y)
+
+        def _refresh():
+            mapping_tree.delete(*mapping_tree.get_children())
+            for product_type, action, value, updated_at in self.product_type_manager.get_all_mappings():
+                mapping_tree.insert("", tk.END, values=(product_type, action, value, updated_at))
+
+        _refresh()
+
+        # Edit / Delete / Add row
+        btn_row = ttk.Frame(outer)
+        btn_row.pack(fill=tk.X, pady=(8, 0))
+
+        def _add():
+            product_type = simpledialog.askstring("Add Mapping", "Product type name:", parent=top)
+            if not product_type or not product_type.strip():
+                return
+            product_type = product_type.strip()
+            _edit_mapping_dialog(product_type, existing=None)
+
+        def _edit():
+            selected = mapping_tree.selection()
+            if not selected:
+                messagebox.showinfo("No Selection", "Select a row to edit.", parent=top)
+                return
+            vals = mapping_tree.item(selected[0], "values")
+            product_type = vals[0]
+            existing = self.product_type_manager.get_mapping(product_type)
+            _edit_mapping_dialog(product_type, existing)
+
+        def _delete():
+            selected = mapping_tree.selection()
+            if not selected:
+                messagebox.showinfo("No Selection", "Select a row to delete.", parent=top)
+                return
+            vals = mapping_tree.item(selected[0], "values")
+            product_type = vals[0]
+            if messagebox.askyesno("Confirm", f"Delete mapping for:\n{product_type}?", parent=top):
+                self.product_type_manager.delete_mapping(product_type)
+                _refresh()
+
+        def _edit_mapping_dialog(product_type: str, existing: dict | None):
+            dlg = tk.Toplevel(top)
+            dlg.title(f"Edit: {product_type}")
+            dlg.geometry("420x200")
+            dlg.transient(top)
+            dlg.grab_set()
+
+            dlg_frame = ttk.Frame(dlg, padding=12)
+            dlg_frame.pack(fill=tk.BOTH, expand=True)
+
+            ttk.Label(dlg_frame, text=f"Product type: {product_type}", font=("", 10, "bold")).grid(
+                row=0, column=0, columnspan=2, sticky="w", pady=(0, 8)
+            )
+
+            ttk.Label(dlg_frame, text="Action:").grid(row=1, column=0, sticky="w", padx=(0, 10), pady=4)
+            action_values = [f"Print: {s}" for s in KNOWN_SIZES] + ["skip", "custom label"]
+            action_var = tk.StringVar()
+            if existing:
+                if existing["action"] == ACTION_PRINT_SIZE:
+                    action_var.set(f"Print: {existing['value']}")
+                elif existing["action"] == ACTION_SKIP:
+                    action_var.set("skip")
+                else:
+                    action_var.set("custom label")
+            else:
+                action_var.set("skip")
+            ttk.Combobox(dlg_frame, textvariable=action_var, values=action_values, state="readonly", width=24).grid(
+                row=1, column=1, sticky="w", pady=4
+            )
+
+            ttk.Label(dlg_frame, text="Custom label:").grid(row=2, column=0, sticky="w", padx=(0, 10), pady=4)
+            custom_var = tk.StringVar(value=existing["value"] if existing and existing["action"] == ACTION_CUSTOM else "")
+            ttk.Entry(dlg_frame, textvariable=custom_var, width=28).grid(row=2, column=1, sticky="w", pady=4)
+
+            def _save():
+                chosen = action_var.get()
+                custom = custom_var.get().strip()
+                if chosen.startswith("Print: "):
+                    size = chosen[len("Print: "):]
+                    self.product_type_manager.set_mapping(product_type, ACTION_PRINT_SIZE, size)
+                elif chosen == "skip":
+                    self.product_type_manager.set_mapping(product_type, ACTION_SKIP)
+                else:
+                    if not custom:
+                        messagebox.showwarning("Custom Label Required", "Enter a custom label.", parent=dlg)
+                        return
+                    self.product_type_manager.set_mapping(product_type, ACTION_CUSTOM, custom)
+                _refresh()
+                dlg.destroy()
+
+            btn_row_dlg = ttk.Frame(dlg_frame)
+            btn_row_dlg.grid(row=3, column=0, columnspan=2, sticky="e", pady=(12, 0))
+            ttk.Button(btn_row_dlg, text="Save", command=_save).pack(side=tk.LEFT, padx=4)
+            ttk.Button(btn_row_dlg, text="Cancel", command=dlg.destroy).pack(side=tk.LEFT, padx=4)
+
+            dlg.wait_window()
+
+        ttk.Button(btn_row, text="Add", command=_add).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btn_row, text="Edit Selected", command=_edit).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btn_row, text="Delete Selected", command=_delete).pack(side=tk.LEFT, padx=4)
+        ttk.Separator(btn_row, orient=tk.VERTICAL).pack(side=tk.LEFT, padx=10, fill=tk.Y)
+        ttk.Button(btn_row, text="Refresh", command=_refresh).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btn_row, text="Close", command=top.destroy).pack(side=tk.RIGHT, padx=4)
 
     def build_file_print_jobs(self, filepaths, chosen_type):
         jobs = []
@@ -1639,11 +1931,6 @@ class SytistDashboard:
         redraw()
 
     def get_address_prefill_order(self):
-        selected_rows = self.tree_orders.selection()
-        if selected_rows:
-            order_id = str(self.tree_orders.item(selected_rows[0])["values"][1])
-            return self.get_order_by_id(order_id)
-
         selected_orders = self.get_selected_orders()
         if len(selected_orders) == 1:
             return selected_orders[0]
@@ -1651,7 +1938,7 @@ class SytistDashboard:
             messagebox.showinfo(
                 "Manual Entry Required",
                 "Multiple orders are checked, so the 4x6 address form will open blank. "
-                "Select a single order row if you want to prefill an address.",
+                "Check a single order if you want to prefill an address.",
             )
         return None
 
@@ -1829,20 +2116,13 @@ class SytistDashboard:
         return [order for order in self.orders if getattr(order, "selected", False)]
 
     def get_shipping_target_order(self):
-        selected_rows = self.tree_orders.selection()
-        if selected_rows:
-            order_id = str(self.tree_orders.item(selected_rows[0])["values"][1])
-            order = self.get_order_by_id(order_id)
-            if order:
-                return order
-
         selected_orders = self.get_selected_orders()
         if len(selected_orders) == 1:
             return selected_orders[0]
         if len(selected_orders) > 1:
             messagebox.showinfo("Select One Order", "USPS shipping currently supports one order at a time.")
             return None
-        messagebox.showwarning("No Order Selected", "Select an order in the table, or check one order first.")
+        messagebox.showwarning("No Order Selected", "Check exactly one order to open the shipping dialog.")
         return None
 
     @staticmethod
@@ -2122,6 +2402,10 @@ class SytistDashboard:
                         "last_error": "",
                     }
                 )
+                self.action_log_store.log_action(
+                    order.id, "shipping_label_created",
+                    f"tracking={tracking or 'n/a'}",
+                )
 
         def track_package():
             tracking_number = tracking_var.get().strip()
@@ -2131,6 +2415,7 @@ class SytistDashboard:
             result = run_action("Track Package", lambda: self.usps_service.get_tracking(tracking_number))
             if result is not None:
                 save_shipment_metadata({"last_tracked_at": datetime.now().isoformat(timespec="seconds"), "last_error": ""})
+                self.action_log_store.log_action(order.id, "tracking_checked", tracking_number)
 
         action_row = ttk.Frame(frame)
         action_row.grid(row=tracking_row + 2, column=0, columnspan=4, sticky="w", pady=(10, 0))
@@ -2281,6 +2566,7 @@ class SytistDashboard:
                         zoho_last_push_at=datetime.now().isoformat(timespec="seconds"),
                         zoho_last_error="",
                     )
+                    self.action_log_store.log_action(order.id, "zoho_push", f"already exists: {existing.get('invoice_number', invoice_number)}")
                     results.append(f"Order {order.id}: already exists as {existing.get('invoice_number', invoice_number)}")
                     continue
 
@@ -2292,19 +2578,21 @@ class SytistDashboard:
                 payload = self._build_zoho_invoice_payload(order, contact_id, invoice_number)
                 created = client.create_invoice(payload)
                 invoice = created.get("invoice") or {}
+                inv_num = invoice.get("invoice_number", invoice_number)
                 self.update_order_state(
                     order.id,
                     zoho_invoice_id=str(invoice.get("invoice_id", "")),
-                    zoho_invoice_number=str(invoice.get("invoice_number", invoice_number)),
+                    zoho_invoice_number=str(inv_num),
                     zoho_last_push_at=datetime.now().isoformat(timespec="seconds"),
                     zoho_last_error="",
                 )
-                results.append(f"Order {order.id}: created {invoice.get('invoice_number', invoice_number)}")
+                self.action_log_store.log_action(order.id, "zoho_push", f"created: {inv_num}")
+                results.append(f"Order {order.id}: created {inv_num}")
             except Exception as exc:
                 self.update_order_state(order.id, zoho_last_error=str(exc))
+                self.action_log_store.log_action(order.id, "zoho_push_error", str(exc)[:200])
                 results.append(f"Order {order.id}: ERROR {exc}")
 
-        self.populate_orders()
         messagebox.showinfo("Zoho Push Results", "\n".join(results[:25]))
 
 
