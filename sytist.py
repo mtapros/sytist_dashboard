@@ -712,6 +712,34 @@ class SytistDashboard:
                 return order
         return None
 
+    def load_sql_file(self):
+        """Prompt for an offline Sytist SQL dump and load it into the dashboard."""
+        filepath = filedialog.askopenfilename(
+            title="Select Sytist SQL Dump",
+            filetypes=[
+                ("SQL dumps or zip archives", "*.sql *.zip"),
+                ("SQL files", "*.sql"),
+                ("Zip archives", "*.zip"),
+                ("All files", "*.*"),
+            ],
+        )
+        if not filepath:
+            return
+
+        try:
+            orders, cart_items, photo_paths, status_lookup = self.data_loader.load_sql_dump(filepath)
+            self.set_data(orders, cart_items, photo_paths, status_lookup)
+            self.save_current_domain_to_selected_preset()
+            self.save_config()
+            messagebox.showinfo(
+                "Success",
+                f"Loaded {len(self.orders)} order{'s' if len(self.orders) != 1 else ''} "
+                f"from {os.path.basename(filepath)}.",
+            )
+        except Exception as exc:
+            logger.exception("Failed to load SQL dump: %s", filepath)
+            messagebox.showerror("SQL Load Error", str(exc))
+
     def open_db_dialog(self):
         if not HAS_MYSQL:
             messagebox.showerror("Missing Library", "Please run: pip install mysql-connector-python")
