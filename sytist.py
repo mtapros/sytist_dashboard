@@ -2,6 +2,7 @@ import io
 import json
 import logging
 import os
+import tempfile
 import threading
 from dataclasses import asdict
 from datetime import datetime
@@ -1363,10 +1364,6 @@ class SytistDashboard:
         return ids
 
     def print_selected_orders(self):
-        if not HAS_WIN32 or not HAS_PIL:
-            messagebox.showerror("Missing Library", "Please run: pip install pywin32 pillow")
-            return
-
         selected_orders = [order for order in self.orders if order.selected]
         if not selected_orders:
             messagebox.showwarning("No Orders", "Please select at least one order.")
@@ -1383,8 +1380,13 @@ class SytistDashboard:
         )
 
         jobs = self.build_order_print_jobs(selected_orders)
-        self._enqueue_jobs(jobs)
-        self.start_print_workflow(jobs, "Order Print")
+        item_ids = self._enqueue_jobs(jobs)
+        if item_ids:
+            messagebox.showinfo(
+                "Queued",
+                f"Added {len(item_ids)} print job(s) to the print queue. "
+                "Open Print Queue to review, adjust, and print them.",
+            )
 
     def open_product_type_manager(self) -> None:
         """Open the Product Type Manager dialog for viewing and editing all mappings."""
@@ -1546,10 +1548,6 @@ class SytistDashboard:
         return jobs
 
     def print_image_files(self):
-        if not HAS_WIN32 or not HAS_PIL:
-            messagebox.showerror("Missing Library", "Please run: pip install pywin32 pillow")
-            return
-
         chosen_type = self.dialogs.ask_image_print_type()
         if not chosen_type:
             return
@@ -1565,8 +1563,13 @@ class SytistDashboard:
             return
 
         jobs = self.build_file_print_jobs(filepaths, chosen_type)
-        self._enqueue_jobs(jobs)
-        self.start_print_workflow(jobs, "Image File Print")
+        item_ids = self._enqueue_jobs(jobs)
+        if item_ids:
+            messagebox.showinfo(
+                "Queued",
+                f"Added {len(item_ids)} image print job(s) to the print queue. "
+                "Open Print Queue to review, adjust, and print them.",
+            )
 
     def open_button_print_editor(self):
         if not HAS_PIL or Image is None or ImageTk is None:
@@ -2019,27 +2022,21 @@ class SytistDashboard:
             messagebox.showinfo("Queued", f"Button job added to print queue (ID {item_id}).", parent=top)
 
         def print_button_sheet():
-            if not HAS_WIN32:
-                messagebox.showerror("Missing Library", "Please run: pip install pywin32")
-                return
-            job = PrintJob(
-                source_type="pil",
-                source=render_current_sheet(),
-                display_name=f"Button - {state['image_name']}",
-                product="Button",
-                size_key="button",
-            )
-            # Enqueue with button specs for reprint support.
             specs = _collect_button_specs()
-            self.print_queue_store.enqueue(
+            item_id = self.print_queue_store.enqueue(
                 source_type="button",
                 source=state.get("image_path", ""),
-                display_name=job.display_name,
+                display_name=f"Button - {state['image_name']}",
                 product="Button",
                 size_key="button",
                 render_settings={"button_specs": specs},
             )
-            self.start_print_workflow([job], "Button Print")
+            messagebox.showinfo(
+                "Queued",
+                f"Button job added to print queue (ID {item_id}). "
+                "Open Print Queue when you are ready to print it.",
+                parent=top,
+            )
 
         ttk.Button(button_row, text="Save 4x6 PNG", command=save_button_sheet).pack(side=tk.LEFT, padx=4)
         ttk.Button(button_row, text="Print", command=print_button_sheet).pack(side=tk.LEFT, padx=4)
@@ -2398,26 +2395,21 @@ class SytistDashboard:
             }
 
         def print_button_from_specs():
-            if not HAS_WIN32:
-                messagebox.showerror("Missing Library", "Please run: pip install pywin32")
-                return
-            job = PrintJob(
-                source_type="pil",
-                source=render_current_sheet_specs(),
-                display_name=f"Button - {state['image_name']}",
-                product="Button",
-                size_key="button",
-            )
             new_specs = _collect_button_specs_2()
-            self.print_queue_store.enqueue(
+            item_id = self.print_queue_store.enqueue(
                 source_type="button",
                 source=state.get("image_path", ""),
-                display_name=job.display_name,
+                display_name=f"Button - {state['image_name']}",
                 product="Button",
                 size_key="button",
                 render_settings={"button_specs": new_specs},
             )
-            self.start_print_workflow([job], "Button Print")
+            messagebox.showinfo(
+                "Queued",
+                f"Button job added to print queue (ID {item_id}). "
+                "Open Print Queue when you are ready to print it.",
+                parent=top,
+            )
 
         def save_button_from_specs():
             default_name = f"{os.path.splitext(state['image_name'])[0]}_button_4x6.png"
@@ -2441,7 +2433,191 @@ class SytistDashboard:
 
         redraw_specs()
 
-    def open_photo_crop_editor(self, item_id: int) -> None:
+    @staticmethod
+    def _is_remote_image_source(source: str) -> bool:
+        parsed = urllib.parse.urlparse(str(source or ""))
+        return parsed.scheme in {"http", "https"}
+
+    def _prepare_queue_item_image(self, item) -> str | None:
+        """Return a local image path for a queue item, downloading URL sources when needed."""
+        settings = dict(item.render_settings or {})
+        specs = dict(settings.get("button_specs") or {})
+
+        candidates = [
+            settings.get("prepared_image_path", ""),
+            specs.get("image_path", ""),
+            item.source,
+        ]
+        for candidate in candidates:
+            if candidate and os.path.isfile(candidate):
+                return candidate
+
+        remote_source = ""
+        for candidate in candidates:
+            if candidate and self._is_remote_image_source(candidate):
+                remote_source = candidate
+                break
+        if not remote_source:
+            return None
+
+        filename = os.path.basename(urllib.parse.urlparse(remote_source).path) or (item.display_name or f"queue_{item.id}")
+        safe_name = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in filename)
+        cache_dir = os.path.join(tempfile.gettempdir(), "sytist_dashboard_queue_cache")
+        os.makedirs(cache_dir, exist_ok=True)
+        local_path = os.path.join(cache_dir, f"queue_{item.id}_{safe_name}")
+
+        if not os.path.isfile(local_path):
+            import ssl
+
+            req = urllib.request.Request(remote_source, headers={"User-Agent": "Mozilla/5.0"})
+            try:
+                try:
+                    with urllib.request.urlopen(req, timeout=30) as response:
+                        raw = response.read()
+                except ssl.SSLError:
+                    ctx = ssl.create_default_context()
+                    ctx.check_hostname = False
+                    ctx.verify_mode = ssl.CERT_NONE
+                    with urllib.request.urlopen(req, context=ctx, timeout=30) as response:
+                        raw = response.read()
+                with open(local_path, "wb") as fh:
+                    fh.write(raw)
+            except Exception as exc:
+                logger.warning("Could not prepare queued image for item %s: %s", item.id, exc)
+                return None
+
+        settings["prepared_image_path"] = local_path
+        if specs:
+            specs["image_path"] = local_path
+            settings["button_specs"] = specs
+        self.print_queue_store.update_render_settings(item.id, settings)
+        item.render_settings = settings
+        return local_path
+
+    def _open_button_editor_for_queue_item(self, item_id: int) -> None:
+        item = self.print_queue_store.get_item(item_id)
+        if not item:
+            messagebox.showerror("Not Found", f"Queue item {item_id} not found.")
+            return
+
+        image_path = self._prepare_queue_item_image(item)
+        if not image_path:
+            messagebox.showerror(
+                "Image Missing",
+                "This queue item does not have an image that can be opened in the button designer.",
+            )
+            return
+
+        specs = dict((item.render_settings or {}).get("button_specs") or {})
+        specs["image_path"] = image_path
+        self.open_button_print_editor_from_specs(specs)
+
+    def _prompt_regular_print_size(self) -> str | None:
+        chosen_type = self.dialogs.ask_image_print_type()
+        if chosen_type in {"4x6", "4x5", "5x7", "8x10"}:
+            return chosen_type
+        if chosen_type:
+            messagebox.showinfo(
+                "Choose Print Type",
+                "Crop adjustment is available for 4x6, 4x5, 5x7, and 8x10 regular print jobs.",
+            )
+        return None
+
+    def _ensure_regular_queue_item(self, item, size_key: str) -> int | None:
+        if item.source_type in ("file", "url") and item.size_key == size_key:
+            return item.id
+
+        if item.source_type in ("file", "url"):
+            source_type = item.source_type
+            source = item.source
+        else:
+            source = self._prepare_queue_item_image(item)
+            if not source:
+                return None
+            source_type = "file"
+
+        render_settings = {}
+        prepared_path = (item.render_settings or {}).get("prepared_image_path", "")
+        if prepared_path:
+            render_settings["prepared_image_path"] = prepared_path
+
+        return self.print_queue_store.enqueue(
+            source_type=source_type,
+            source=source,
+            display_name=item.display_name,
+            product=item.product,
+            size_key=size_key,
+            order_id=item.order_id,
+            routed_printer=item.routed_printer,
+            render_settings=render_settings or None,
+        )
+
+    def open_queue_item_editor(self, item_id: int) -> None:
+        item = self.print_queue_store.get_item(item_id)
+        if not item:
+            messagebox.showerror("Not Found", f"Queue item {item_id} not found.")
+            return
+
+        top = tk.Toplevel(self.root)
+        top.title(f"Queue Item Options — {item.display_name}")
+        top.geometry("420x190")
+        top.transient(self.root)
+
+        ttk.Label(
+            top,
+            text="Choose how to edit this queued image. Crop adjustment can be used to force a regular print, and Button Designer can be used for any queued image.",
+            wraplength=380,
+            justify=tk.LEFT,
+        ).pack(fill=tk.X, padx=16, pady=(16, 10))
+
+        btn_frame = ttk.Frame(top, padding=(12, 4))
+        btn_frame.pack(fill=tk.X)
+
+        ttk.Button(
+            btn_frame,
+            text="Edit Crop / Regular Print…",
+            command=lambda: (
+                top.destroy(),
+                self.open_queue_crop_editor(item_id),
+            ),
+        ).pack(fill=tk.X, pady=4)
+        ttk.Button(
+            btn_frame,
+            text="Open Button Designer…",
+            command=lambda: (
+                top.destroy(),
+                self._open_button_editor_for_queue_item(item_id),
+            ),
+        ).pack(fill=tk.X, pady=4)
+        ttk.Button(btn_frame, text="Close", command=top.destroy).pack(anchor="e", pady=(8, 0))
+
+    def open_queue_crop_editor(self, item_id: int) -> None:
+        item = self.print_queue_store.get_item(item_id)
+        if not item:
+            messagebox.showerror("Not Found", f"Queue item {item_id} not found.")
+            return
+
+        size_key = item.size_key if item.size_key in ("4x6", "4x5", "5x7", "8x10") else None
+        if not size_key:
+            size_key = self._prompt_regular_print_size()
+            if not size_key:
+                return
+
+        target_item_id = self._ensure_regular_queue_item(item, size_key)
+        if not target_item_id:
+            messagebox.showerror(
+                "Image Missing",
+                "This queue item does not have an image that can be opened for crop adjustment.",
+            )
+            return
+        if target_item_id != item_id:
+            messagebox.showinfo(
+                "Queued",
+                f"Created regular print queue item (ID {target_item_id}) for crop adjustment.",
+            )
+        self.open_photo_crop_editor(target_item_id, size_key_override=size_key)
+
+    def open_photo_crop_editor(self, item_id: int, size_key_override: str | None = None) -> None:
         """Open a lightweight crop/position adjustment editor for a queued photo job.
 
         Supports 4x6, 5x7, 8x10, and 4x5 print sizes.  The default centered
@@ -2457,34 +2633,32 @@ class SytistDashboard:
             messagebox.showerror("Not Found", f"Queue item {item_id} not found.")
             return
 
-        if item.source_type not in ("file", "url"):
-            messagebox.showinfo("Not Applicable", "Crop adjustment is only available for file or URL photo jobs.")
-            return
-
-        if item.source_type == "file":
-            img_path = item.source
-            if not os.path.isfile(img_path):
+        img_path = self._prepare_queue_item_image(item)
+        if not img_path:
+            if item.source_type == "file" and item.source:
                 img_path = filedialog.askopenfilename(
                     title="Locate Image File",
                     filetypes=[("Image Files", "*.jpg *.jpeg *.png *.tif *.tiff *.bmp"), ("All Files", "*.*")],
                 )
-                if not img_path:
-                    return
-            try:
-                source_img = Image.open(img_path).convert("RGB")
-            except Exception as exc:
-                messagebox.showerror("Image Error", f"Could not open image:\n{exc}")
+                if img_path:
+                    new_settings = dict(item.render_settings or {})
+                    new_settings["prepared_image_path"] = img_path
+                    self.print_queue_store.update_render_settings(item_id, new_settings)
+                    item.render_settings = new_settings
+            if not img_path:
+                messagebox.showerror(
+                    "Image Missing",
+                    "This queue item does not have an image that can be opened for crop adjustment.",
+                )
                 return
-        else:
-            messagebox.showinfo(
-                "URL Source",
-                "Crop adjustment for URL sources requires downloading the image first. "
-                "Please save the image locally and update the source path.",
-            )
+        try:
+            source_img = Image.open(img_path).convert("RGB")
+        except Exception as exc:
+            messagebox.showerror("Image Error", f"Could not open image:\n{exc}")
             return
 
         from printing_service import PRINT_ASPECT_RATIOS
-        size_key = item.size_key
+        size_key = size_key_override or item.size_key
         ratio = PRINT_ASPECT_RATIOS.get(size_key)
         if not ratio:
             messagebox.showinfo("Not Applicable", f"Crop adjustment is not available for size '{size_key}'.")
@@ -2652,7 +2826,7 @@ class SytistDashboard:
             "order": ("Order", 80),
             "status": ("Status", 80),
             "printed": ("Printed", 60),
-            "printed_at": ("Printed At", 140),
+            "printed_at": ("Last Printed At", 140),
             "reprints": ("Reprints", 60),
             "error": ("Last Error", 160),
         }
@@ -2780,26 +2954,20 @@ class SytistDashboard:
             if len(sel) != 1:
                 messagebox.showwarning("Selection", "Select exactly one item to edit crop settings.", parent=top)
                 return
-            qi = sel[0]
-            if qi.source_type not in ("file", "url"):
-                messagebox.showinfo("Not Applicable", "Crop editing is only available for file or URL photo jobs.", parent=top)
-                return
-            top.after(0, lambda: self.open_photo_crop_editor(qi.id))
+            top.after(0, lambda: self.open_queue_crop_editor(sel[0].id))
 
         def _action_open_button_editor():
-            """Reopen the button designer for the selected button item."""
+            """Open the button designer for the selected queue item."""
             sel = _selected_items()
             if len(sel) != 1:
-                messagebox.showwarning("Selection", "Select exactly one button item.", parent=top)
+                messagebox.showwarning("Selection", "Select exactly one queue item.", parent=top)
                 return
-            qi = sel[0]
-            if qi.source_type != "button":
-                messagebox.showinfo("Not Applicable", "This action is only available for button queue items.", parent=top)
-                return
-            specs = qi.render_settings.get("button_specs", {})
-            if not specs:
-                specs = {"image_path": qi.source}
-            top.after(0, lambda: self.open_button_print_editor_from_specs(specs))
+            top.after(0, lambda: self._open_button_editor_for_queue_item(sel[0].id))
+
+        def _action_open_editor(event=None):
+            qi = _item_map.get(tree.focus() or "")
+            if qi:
+                top.after(0, lambda: self.open_queue_item_editor(qi.id))
 
         # ------------------------------------------------------------------
         # Button bar
@@ -2816,6 +2984,7 @@ class SytistDashboard:
         ttk.Button(btn_frame, text="Refresh", command=_load_items).pack(side=tk.LEFT, padx=3)
         ttk.Button(btn_frame, text="Close", command=top.destroy).pack(side=tk.RIGHT, padx=3)
 
+        tree.bind("<Double-1>", _action_open_editor)
         _load_items()
 
     def _queue_item_to_print_job(self, qi) -> "PrintJob | None":
@@ -2826,20 +2995,31 @@ class SytistDashboard:
         from print_queue_store import PrintQueueItem
         settings = qi.render_settings or {}
 
-        if qi.source_type == "button":
-            # Render the button sheet from stored specs.
+        if qi.source_type == "button" or qi.size_key == "button":
+            # Render the button sheet from stored specs or directly from the queued image.
             specs = settings.get("button_specs", {})
-            image_path = specs.get("image_path", "") or qi.source
-            if not image_path or not os.path.isfile(image_path):
-                logger.warning("Button reprint: image not found at %s", image_path)
-                return None
-            if not HAS_PIL or Image is None:
-                return None
-            try:
-                source_img = Image.open(image_path).convert("RGB")
-            except Exception as exc:
-                logger.warning("Button reprint: could not open image %s: %s", image_path, exc)
-                return None
+            source_img = None
+            image_path = specs.get("image_path", "") or settings.get("prepared_image_path", "")
+            if image_path and os.path.isfile(image_path) and HAS_PIL and Image is not None:
+                try:
+                    source_img = Image.open(image_path).convert("RGB")
+                except Exception as exc:
+                    logger.warning("Button reprint: could not open image %s: %s", image_path, exc)
+                    source_img = None
+            if source_img is None:
+                try:
+                    source_img = self.printing_service._load_image_for_job(
+                        PrintJob(
+                            source_type=qi.source_type if qi.source_type in ("file", "url") else "file",
+                            source=qi.source,
+                            display_name=qi.display_name,
+                            product=qi.product,
+                            size_key=qi.size_key or "button",
+                        )
+                    )
+                except Exception as exc:
+                    logger.warning("Button reprint: could not load source image for item %s: %s", qi.id, exc)
+                    return None
             try:
                 cx_off = int(round(float(specs.get("circle_offset_x", 0))))
                 cy_off = int(round(float(specs.get("circle_offset_y", 0))))

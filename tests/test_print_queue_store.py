@@ -215,6 +215,10 @@ class PrintQueueItemHelperTests(unittest.TestCase):
         item = self._make_item(source_type="file", size_key="4x6")
         self.assertFalse(item.is_button)
 
+    def test_is_button_true_for_button_size_key(self):
+        item = self._make_item(source_type="url", size_key="button")
+        self.assertTrue(item.is_button)
+
     def test_is_photo_true_4x6(self):
         item = self._make_item(size_key="4x6")
         self.assertTrue(item.is_photo)

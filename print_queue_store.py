@@ -92,7 +92,7 @@ class PrintQueueItem:
 
     @property
     def is_button(self) -> bool:
-        return self.source_type == "button"
+        return self.source_type == "button" or self.size_key == "button"
 
     @property
     def is_photo(self) -> bool:
