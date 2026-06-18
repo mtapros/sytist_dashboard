@@ -71,6 +71,8 @@ stores:
   printer queue names
 - **USPS settings** — OAuth client credentials, API base/token URLs, timeout,
   and a default ship-from/return address used by label requests
+- **Mailing-label brands** — per-brand logo PNG path plus logo scale and X/Y
+  placement used by the 4x6 landscape address-label preview/print flow
 
 ### USPS shipping (MVP)
 

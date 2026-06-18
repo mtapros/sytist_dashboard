@@ -35,6 +35,9 @@ class USPSConfigAndStateTests(unittest.TestCase):
         self.assertEqual(config["usps"]["base_url"], "https://api.usps.com")
         self.assertEqual(config["usps"]["ship_from"]["country"], "US")
         self.assertIn("4x5", config["printer_routes"])
+        self.assertIn("mailing_label", config)
+        self.assertIn("Default", config["mailing_label"]["brands"])
+        self.assertEqual(config["mailing_label"]["brands"]["Default"]["logo_scale"], 1.0)
 
     def test_dashboard_state_defaults_include_usps_shipment(self):
         with tempfile.TemporaryDirectory() as tmpdir:

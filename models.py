@@ -93,6 +93,7 @@ class ShippingAddress:
     country: str = "US"
     phone: str = ""
     email: str = ""
+    custom_text: str = ""
 
 
 @dataclass
@@ -104,6 +105,7 @@ class PrintJob:
     size_key: str | None = None
     routed_printer: str | None = None
     address: "ShippingAddress | None" = None
+    label_options: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass

@@ -1,4 +1,5 @@
 import unittest
+import tempfile
 from unittest import mock
 
 from PIL import Image, ImageChops
@@ -269,6 +270,19 @@ class AddressLabelTests(unittest.TestCase):
         )
         self.assertEqual(lines[-1], "Canada")
 
+    def test_address_lines_use_custom_text_when_provided(self):
+        lines = self.service._address_lines_for_label(
+            ShippingAddress(
+                full_name="Jane Doe",
+                address_1="123 Main St",
+                city="Albany",
+                state="NY",
+                postal_code="12207",
+                custom_text="Line One\nLine Two",
+            )
+        )
+        self.assertEqual(lines, ["Line One", "Line Two"])
+
     def test_render_address_label_creates_centered_4x6_canvas(self):
         img = self.service._render_address_label(
             ShippingAddress(
@@ -286,6 +300,31 @@ class AddressLabelTests(unittest.TestCase):
         self.assertEqual(round(img.size[0] * ADDRESS_LABEL_TEXT_WIDTH_RATIO), 1080)
         diff = ImageChops.difference(img, Image.new("RGB", img.size, "white"))
         self.assertIsNotNone(diff.getbbox())
+
+    def test_render_address_label_supports_custom_text_without_street_city_state_zip(self):
+        img = self.service._render_address_label(
+            ShippingAddress(
+                custom_text="Custom Label\nSecond Line",
+            )
+        )
+        self.assertEqual(img.size, ADDRESS_LABEL_SIZE)
+        diff = ImageChops.difference(img, Image.new("RGB", img.size, "white"))
+        self.assertIsNotNone(diff.getbbox())
+
+    def test_render_address_label_draws_logo_with_position_and_scale(self):
+        logo = Image.new("RGBA", (20, 20), (0, 0, 0, 255))
+        with tempfile.NamedTemporaryFile(suffix=".png") as tmp:
+            logo.save(tmp.name, format="PNG")
+            img = self.service._render_address_label(
+                ShippingAddress(custom_text="Custom"),
+                label_options={
+                    "logo_path": tmp.name,
+                    "logo_scale": 2.0,
+                    "logo_x": 50,
+                    "logo_y": 60,
+                },
+            )
+        self.assertEqual(img.getpixel((55, 65)), (0, 0, 0))
 
     def test_prepare_image_for_address_job_uses_label_renderer(self):
         job = PrintJob(
