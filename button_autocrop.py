@@ -1,9 +1,11 @@
-"""Button auto-crop suggestion helpers with optional MediaPipe support."""
+"""Button auto-crop suggestion helpers with optional local MediaPipe Tasks support."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 import logging
+from pathlib import Path
+import threading
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -20,6 +22,8 @@ class AutoCropSuggestion:
 
 
 DEFAULT_AUTOCROP_TEMPLATE_NAME = "Default Face"
+_LOCAL_FACE_MODEL_ENV = "SYTIST_MEDIAPIPE_FACE_MODEL"
+_LOCAL_FACE_MODEL_FILENAME = "blaze_face_short_range.tflite"
 
 
 @dataclass(frozen=True)
@@ -178,8 +182,41 @@ def _square_to_suggestion(
     )
 
 
+def _candidate_face_model_paths() -> list[Path]:
+    paths: list[Path] = []
+
+    import os
+
+    env_value = str(os.environ.get(_LOCAL_FACE_MODEL_ENV, "") or "").strip()
+    if env_value:
+        paths.append(Path(env_value).expanduser())
+
+    here = Path(__file__).resolve().parent
+    paths.extend(
+        [
+            here / _LOCAL_FACE_MODEL_FILENAME,
+            here / "models" / _LOCAL_FACE_MODEL_FILENAME,
+            Path.home() / ".volumetoolkit_vtk" / "models" / _LOCAL_FACE_MODEL_FILENAME,
+        ]
+    )
+
+    unique: list[Path] = []
+    seen: set[str] = set()
+    for path in paths:
+        key = str(path)
+        if key not in seen:
+            unique.append(path)
+            seen.add(key)
+    return unique
+
+
 class _MediaPipeFaceSquareDetector:
-    """Best-effort MediaPipe detector; returns a face-centered square crop."""
+    """Best-effort local MediaPipe Tasks detector; returns face bounds and square crop."""
+
+    _shared_lock = threading.Lock()
+    _shared_detector = None
+    _shared_import_error: str | None = None
+    _shared_model_path: Path | None = None
 
     def __init__(self) -> None:
         self._mp = None
@@ -194,11 +231,73 @@ class _MediaPipeFaceSquareDetector:
         except Exception as exc:
             self._mp = None
             self._np = None
+            self._set_import_error(f"MediaPipe/numpy import failed: {exc}")
             logger.warning("MediaPipe/numpy imports unavailable for button auto-crop: %s", exc)
+
+    @classmethod
+    def _set_import_error(cls, message: str) -> None:
+        with cls._shared_lock:
+            cls._shared_import_error = message
+
+    @classmethod
+    def unavailable_reason(cls) -> str:
+        return cls._shared_import_error or "MediaPipe face detector is not available."
 
     @property
     def available(self) -> bool:
-        return self._mp is not None and self._np is not None
+        return self._mp is not None and self._np is not None and self._get_detector() is not None
+
+    def _resolve_model_path(self) -> Path | None:
+        for path in _candidate_face_model_paths():
+            try:
+                if path.is_file():
+                    logger.info("Using local MediaPipe face model: %s", path)
+                    return path
+            except Exception:
+                continue
+        return None
+
+    def _get_detector(self):
+        if self._mp is None:
+            return None
+        with self.__class__._shared_lock:
+            if self.__class__._shared_detector is not None:
+                return self.__class__._shared_detector
+
+            model_path = self._resolve_model_path()
+            if model_path is None:
+                searched = ", ".join(str(p) for p in _candidate_face_model_paths())
+                self.__class__._shared_import_error = (
+                    "Local MediaPipe face model not found. "
+                    f"Set {_LOCAL_FACE_MODEL_ENV} or place {_LOCAL_FACE_MODEL_FILENAME} in a known local models folder. "
+                    f"Searched: {searched}"
+                )
+                logger.warning(self.__class__._shared_import_error)
+                return None
+
+            try:
+                mp = self._mp
+                BaseOptions = mp.tasks.BaseOptions
+                FaceDetector = mp.tasks.vision.FaceDetector
+                FaceDetectorOptions = mp.tasks.vision.FaceDetectorOptions
+                RunningMode = mp.tasks.vision.RunningMode
+
+                options = FaceDetectorOptions(
+                    base_options=BaseOptions(model_asset_path=str(model_path)),
+                    running_mode=RunningMode.IMAGE,
+                    min_detection_confidence=0.5,
+                )
+                self.__class__._shared_detector = FaceDetector.create_from_options(options)
+                self.__class__._shared_model_path = model_path
+                self.__class__._shared_import_error = None
+                logger.info("Initialized local MediaPipe Tasks face detector from %s.", model_path)
+            except Exception as exc:
+                self.__class__._shared_detector = None
+                self.__class__._shared_import_error = f"Failed to initialize local MediaPipe face detector: {exc}"
+                logger.warning("Failed to initialize local MediaPipe face detector: %s", exc)
+                return None
+
+            return self.__class__._shared_detector
 
     def detect_square(self, source_img: Any) -> tuple[float, float, float] | None:
         face_bounds = self.detect_face_bounds(source_img)
@@ -213,41 +312,47 @@ class _MediaPipeFaceSquareDetector:
         return _clamp_square(square_x, square_y, square_size, source_img.width, source_img.height)
 
     def detect_face_bounds(self, source_img: Any) -> tuple[float, float, float, float] | None:
-        if not self.available:
-            logger.warning("MediaPipe detection skipped because dependencies are unavailable.")
+        detector = self._get_detector()
+        if detector is None or self._mp is None or self._np is None:
+            logger.warning("MediaPipe Tasks detection skipped because dependencies or local model are unavailable.")
             return None
+
         mp = self._mp
         np = self._np
-        logger.info("Starting MediaPipe face detection for image size %sx%s.", source_img.width, source_img.height)
-        image_np = np.asarray(source_img.convert("RGB"))
+        logger.info("Starting local MediaPipe Tasks face detection for image size %sx%s.", source_img.width, source_img.height)
+        rgb = source_img.convert("RGB") if getattr(source_img, "mode", "") != "RGB" else source_img
+        image_np = np.asarray(rgb)
         try:
-            with mp.solutions.face_detection.FaceDetection(
-                model_selection=1,
-                min_detection_confidence=0.5,
-            ) as detector:
-                results = detector.process(image_np)
+            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=image_np)
+            results = detector.detect(mp_image)
         except Exception as exc:
-            logger.warning("MediaPipe face detection failed: %s", exc)
+            logger.warning("Local MediaPipe Tasks face detection failed: %s", exc)
             return None
 
         detections = list(getattr(results, "detections", []) or [])
-        logger.info("MediaPipe face detection returned %s detections.", len(detections))
+        logger.info("Local MediaPipe Tasks face detection returned %s detections.", len(detections))
         if not detections:
             return None
-        best = max(detections, key=lambda d: float((getattr(d, "score", [0.0]) or [0.0])[0]))
-        box = getattr(getattr(best, "location_data", None), "relative_bounding_box", None)
+
+        def _score(det: Any) -> float:
+            categories = list(getattr(det, "categories", []) or [])
+            if not categories:
+                return 0.0
+            return float(getattr(categories[0], "score", 0.0) or 0.0)
+
+        best = max(detections, key=_score)
+        box = getattr(best, "bounding_box", None)
         if box is None:
             return None
 
-        img_w, img_h = source_img.size
-        face_x = float(getattr(box, "xmin", 0.0)) * img_w
-        face_y = float(getattr(box, "ymin", 0.0)) * img_h
-        face_w = float(getattr(box, "width", 0.0)) * img_w
-        face_h = float(getattr(box, "height", 0.0)) * img_h
+        face_x = float(getattr(box, "origin_x", 0.0))
+        face_y = float(getattr(box, "origin_y", 0.0))
+        face_w = float(getattr(box, "width", 0.0))
+        face_h = float(getattr(box, "height", 0.0))
         if face_w <= 0 or face_h <= 0:
             return None
         logger.info(
-            "MediaPipe selected face bounds x=%.1f y=%.1f w=%.1f h=%.1f.",
+            "Local MediaPipe Tasks selected face bounds x=%.1f y=%.1f w=%.1f h=%.1f.",
             face_x,
             face_y,
             face_w,
@@ -276,13 +381,14 @@ def suggest_button_autocrop_from_template(
 
     detector = _MediaPipeFaceSquareDetector()
     if not detector.available:
-        logger.warning("Template '%s': MediaPipe unavailable; falling back to centered crop.", template_obj.name)
+        reason = detector.unavailable_reason()
+        logger.warning("Template '%s': %s Falling back to centered crop.", template_obj.name, reason)
         return AutoCropSuggestion(
             scale=fallback.scale,
             offset=list(fallback.offset),
             method="centered",
             status="mediapipe_unavailable",
-            status_message="MediaPipe is not installed; using centered fallback and ignoring face controls.",
+            status_message=f"{reason} Using centered fallback and ignoring face controls.",
         )
     face_bounds = detector.detect_face_bounds(source_img)
     if not face_bounds:
@@ -324,17 +430,18 @@ def suggest_button_autocrop(source_img: Any, crop_size: tuple[int, int]) -> Auto
     fallback = _default_centered_suggestion(source_img, crop_size)
     detector = _MediaPipeFaceSquareDetector()
     if not detector.available:
-        logger.warning("MediaPipe unavailable; using centered fallback crop.")
+        reason = detector.unavailable_reason()
+        logger.warning("%s Using centered fallback crop.", reason)
         return AutoCropSuggestion(
             scale=fallback.scale,
             offset=list(fallback.offset),
             method="centered",
             status="mediapipe_unavailable",
-            status_message="MediaPipe is not installed; using centered fallback.",
+            status_message=f"{reason} Using centered fallback.",
         )
     square = detector.detect_square(source_img)
     if not square:
-        logger.warning("No face detected by MediaPipe; using centered fallback crop.")
+        logger.warning("No face detected by local MediaPipe Tasks; using centered fallback crop.")
         return AutoCropSuggestion(
             scale=fallback.scale,
             offset=list(fallback.offset),
@@ -343,7 +450,7 @@ def suggest_button_autocrop(source_img: Any, crop_size: tuple[int, int]) -> Auto
             status_message="No face was detected; using centered fallback.",
         )
     x, y, size = square
-    logger.info("MediaPipe face crop applied with square x=%.1f y=%.1f size=%.1f.", x, y, size)
+    logger.info("Local MediaPipe face crop applied with square x=%.1f y=%.1f size=%.1f.", x, y, size)
     return _square_to_suggestion(
         source_img,
         crop_size,
