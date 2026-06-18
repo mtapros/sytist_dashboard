@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -92,6 +95,17 @@ def default_autocrop_template_store() -> dict[str, Any]:
     }
 
 
+def format_autocrop_status_line(suggestion: AutoCropSuggestion) -> str:
+    status_prefix = {
+        "centered_mode": "Centered mode selected",
+        "mediapipe_unavailable": "MediaPipe unavailable",
+        "no_face_detected": "No face detected",
+        "face_crop_applied": "Face crop applied",
+    }.get(suggestion.status, suggestion.status.replace("_", " ").strip().title() or "Auto-crop status")
+    detail = (suggestion.status_message or "").strip()
+    return f"{status_prefix}: {detail}" if detail else status_prefix
+
+
 def normalize_autocrop_template_store(data: dict[str, Any] | None) -> dict[str, Any]:
     normalized = default_autocrop_template_store()
     saved = dict(data or {})
@@ -176,9 +190,11 @@ class _MediaPipeFaceSquareDetector:
 
             self._mp = mp
             self._np = np
-        except Exception:
+            logger.info("MediaPipe and numpy imports succeeded for button auto-crop.")
+        except Exception as exc:
             self._mp = None
             self._np = None
+            logger.warning("MediaPipe/numpy imports unavailable for button auto-crop: %s", exc)
 
     @property
     def available(self) -> bool:
@@ -198,9 +214,11 @@ class _MediaPipeFaceSquareDetector:
 
     def detect_face_bounds(self, source_img: Any) -> tuple[float, float, float, float] | None:
         if not self.available:
+            logger.warning("MediaPipe detection skipped because dependencies are unavailable.")
             return None
         mp = self._mp
         np = self._np
+        logger.info("Starting MediaPipe face detection for image size %sx%s.", source_img.width, source_img.height)
         image_np = np.asarray(source_img.convert("RGB"))
         try:
             with mp.solutions.face_detection.FaceDetection(
@@ -208,10 +226,12 @@ class _MediaPipeFaceSquareDetector:
                 min_detection_confidence=0.5,
             ) as detector:
                 results = detector.process(image_np)
-        except Exception:
+        except Exception as exc:
+            logger.warning("MediaPipe face detection failed: %s", exc)
             return None
 
         detections = list(getattr(results, "detections", []) or [])
+        logger.info("MediaPipe face detection returned %s detections.", len(detections))
         if not detections:
             return None
         best = max(detections, key=lambda d: float((getattr(d, "score", [0.0]) or [0.0])[0]))
@@ -226,6 +246,13 @@ class _MediaPipeFaceSquareDetector:
         face_h = float(getattr(box, "height", 0.0)) * img_h
         if face_w <= 0 or face_h <= 0:
             return None
+        logger.info(
+            "MediaPipe selected face bounds x=%.1f y=%.1f w=%.1f h=%.1f.",
+            face_x,
+            face_y,
+            face_w,
+            face_h,
+        )
         return face_x, face_y, face_w, face_h
 
 
@@ -238,6 +265,7 @@ def suggest_button_autocrop_from_template(
     fallback = _default_centered_suggestion(source_img, crop_size)
     template_obj = AutoCropTemplate.from_dict(template if isinstance(template, dict) else template.to_dict() if template else None)
     if template_obj.detector_mode == "centered":
+        logger.info("Template '%s' uses centered detector mode.", template_obj.name)
         return AutoCropSuggestion(
             scale=fallback.scale,
             offset=list(fallback.offset),
@@ -248,6 +276,7 @@ def suggest_button_autocrop_from_template(
 
     detector = _MediaPipeFaceSquareDetector()
     if not detector.available:
+        logger.warning("Template '%s': MediaPipe unavailable; falling back to centered crop.", template_obj.name)
         return AutoCropSuggestion(
             scale=fallback.scale,
             offset=list(fallback.offset),
@@ -257,6 +286,7 @@ def suggest_button_autocrop_from_template(
         )
     face_bounds = detector.detect_face_bounds(source_img)
     if not face_bounds:
+        logger.warning("Template '%s': no face detected; falling back to centered crop.", template_obj.name)
         return AutoCropSuggestion(
             scale=fallback.scale,
             offset=list(fallback.offset),
@@ -275,6 +305,7 @@ def suggest_button_autocrop_from_template(
     anchor_y = rect_y + rect_h * template_obj.anchor_y
     square_x = anchor_x - square_size / 2
     square_y = anchor_y - square_size / 2
+    logger.info("Template '%s': face crop applied.", template_obj.name)
     return _square_to_suggestion(
         source_img,
         crop_size,
@@ -293,6 +324,7 @@ def suggest_button_autocrop(source_img: Any, crop_size: tuple[int, int]) -> Auto
     fallback = _default_centered_suggestion(source_img, crop_size)
     detector = _MediaPipeFaceSquareDetector()
     if not detector.available:
+        logger.warning("MediaPipe unavailable; using centered fallback crop.")
         return AutoCropSuggestion(
             scale=fallback.scale,
             offset=list(fallback.offset),
@@ -302,6 +334,7 @@ def suggest_button_autocrop(source_img: Any, crop_size: tuple[int, int]) -> Auto
         )
     square = detector.detect_square(source_img)
     if not square:
+        logger.warning("No face detected by MediaPipe; using centered fallback crop.")
         return AutoCropSuggestion(
             scale=fallback.scale,
             offset=list(fallback.offset),
@@ -310,6 +343,7 @@ def suggest_button_autocrop(source_img: Any, crop_size: tuple[int, int]) -> Auto
             status_message="No face was detected; using centered fallback.",
         )
     x, y, size = square
+    logger.info("MediaPipe face crop applied with square x=%.1f y=%.1f size=%.1f.", x, y, size)
     return _square_to_suggestion(
         source_img,
         crop_size,

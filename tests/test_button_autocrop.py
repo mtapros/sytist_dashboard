@@ -4,7 +4,9 @@ import unittest
 from unittest import mock
 
 from button_autocrop import (
+    AutoCropSuggestion,
     AutoCropTemplate,
+    format_autocrop_status_line,
     normalize_autocrop_template_store,
     suggest_button_autocrop,
     suggest_button_autocrop_from_template,
@@ -114,6 +116,37 @@ class ButtonAutoCropTests(unittest.TestCase):
         self.assertEqual(suggestion.status, "mediapipe_unavailable")
         self.assertIn("MediaPipe is not installed", suggestion.status_message)
         self.assertEqual(suggestion.offset, [-300, 0])
+
+    def test_status_line_formats_key_autocrop_outcomes(self):
+        centered = format_autocrop_status_line(
+            AutoCropSuggestion(scale=1.0, offset=[0, 0], method="centered", status="centered_mode", status_message="Centered detector selected.")
+        )
+        unavailable = format_autocrop_status_line(
+            AutoCropSuggestion(scale=1.0, offset=[0, 0], method="centered", status="mediapipe_unavailable", status_message="MediaPipe missing.")
+        )
+        no_face = format_autocrop_status_line(
+            AutoCropSuggestion(scale=1.0, offset=[0, 0], method="centered", status="no_face_detected", status_message="No face found.")
+        )
+        applied = format_autocrop_status_line(
+            AutoCropSuggestion(scale=1.0, offset=[0, 0], method="mediapipe-face", status="face_crop_applied", status_message="Face crop applied.")
+        )
+        self.assertTrue(centered.startswith("Centered mode selected:"))
+        self.assertTrue(unavailable.startswith("MediaPipe unavailable:"))
+        self.assertTrue(no_face.startswith("No face detected:"))
+        self.assertTrue(applied.startswith("Face crop applied:"))
+
+    def test_template_autocrop_logs_fallback_when_no_face_detected(self):
+        image = _DummyImage(3000, 2000)
+        template = AutoCropTemplate(name="Fallback Test")
+        with mock.patch(
+            "button_autocrop._MediaPipeFaceSquareDetector.available",
+            new_callable=mock.PropertyMock,
+            return_value=True,
+        ), mock.patch("button_autocrop._MediaPipeFaceSquareDetector.detect_face_bounds", return_value=None), mock.patch(
+            "button_autocrop.logger"
+        ) as logger_mock:
+            suggest_button_autocrop_from_template(image, (1200, 1200), template)
+        logger_mock.warning.assert_any_call("Template '%s': no face detected; falling back to centered crop.", template.name)
 
     def test_normalize_template_store_adds_default_and_clamps_values(self):
         normalized = normalize_autocrop_template_store(

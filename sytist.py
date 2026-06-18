@@ -18,6 +18,7 @@ from action_log import ActionLogStore
 from button_autocrop import (
     AutoCropTemplate,
     default_autocrop_template,
+    format_autocrop_status_line,
     normalize_autocrop_template_store,
     suggest_button_autocrop_from_template,
 )
@@ -1927,6 +1928,16 @@ class SytistDashboard:
             width=24,
         )
         autocrop_template_combo.grid(row=0, column=1, sticky="ew", padx=6, pady=3)
+        auto_crop_status_var = tk.StringVar(value=format_autocrop_status_line(auto_suggestion))
+        ttk.Label(
+            autocrop_frame,
+            textvariable=auto_crop_status_var,
+            wraplength=460,
+            justify=tk.LEFT,
+        ).grid(row=1, column=0, columnspan=3, sticky="w", pady=(4, 0))
+
+        def update_autocrop_status(suggestion):
+            auto_crop_status_var.set(format_autocrop_status_line(suggestion))
 
         def refresh_autocrop_template_choices(selected_name: str | None = None):
             names = self._button_autocrop_template_names()
@@ -1947,6 +1958,7 @@ class SytistDashboard:
             state["scale"] = suggestion.scale
             state["offset"] = list(suggestion.offset)
             state["auto_crop_template"] = template.to_dict()
+            update_autocrop_status(suggestion)
             if template.name in self._button_autocrop_template_names():
                 auto_crop_template_var.set(template.name)
                 self._save_button_autocrop_store(self._get_button_autocrop_store(), selected_template=template.name)
@@ -1973,6 +1985,7 @@ class SytistDashboard:
 
         def on_autocrop_template_selected(*_args):
             template = get_selected_autocrop_template()
+            update_autocrop_status(suggest_button_autocrop_from_template(source_img, BUTTON_CROP_SIZE, template))
             if template.name in self._button_autocrop_template_names():
                 self._save_button_autocrop_store(self._get_button_autocrop_store(), selected_template=template.name)
 
@@ -2488,6 +2501,16 @@ class SytistDashboard:
             width=24,
         )
         autocrop_template_combo.grid(row=0, column=1, sticky="ew", padx=6, pady=3)
+        auto_crop_status_var = tk.StringVar(value=format_autocrop_status_line(auto_suggestion))
+        ttk.Label(
+            autocrop_frame,
+            textvariable=auto_crop_status_var,
+            wraplength=460,
+            justify=tk.LEFT,
+        ).grid(row=1, column=0, columnspan=3, sticky="w", pady=(4, 0))
+
+        def update_autocrop_status(suggestion):
+            auto_crop_status_var.set(format_autocrop_status_line(suggestion))
 
         def refresh_autocrop_template_choices(selected_name: str | None = None):
             names = self._button_autocrop_template_names()
@@ -2508,6 +2531,7 @@ class SytistDashboard:
             state["scale"] = suggestion.scale
             state["offset"] = list(suggestion.offset)
             state["auto_crop_template"] = template.to_dict()
+            update_autocrop_status(suggestion)
             if template.name in self._button_autocrop_template_names():
                 auto_crop_template_var.set(template.name)
                 self._save_button_autocrop_store(self._get_button_autocrop_store(), selected_template=template.name)
@@ -2534,6 +2558,7 @@ class SytistDashboard:
 
         def on_autocrop_template_selected(*_args):
             template = get_selected_autocrop_template()
+            update_autocrop_status(suggest_button_autocrop_from_template(source_img, BUTTON_CROP_SIZE, template))
             if template.name in self._button_autocrop_template_names():
                 self._save_button_autocrop_store(self._get_button_autocrop_store(), selected_template=template.name)
 
