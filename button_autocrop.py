@@ -25,6 +25,9 @@ DEFAULT_AUTOCROP_TEMPLATE_NAME = "Default Face"
 _LOCAL_FACE_MODEL_ENV = "SYTIST_MEDIAPIPE_FACE_MODEL"
 _LOCAL_FACE_MODEL_FILENAME = "blaze_face_short_range.tflite"
 DEFAULT_MIN_DETECTION_CONFIDENCE = 0.3
+DEFAULT_FACE_WIDTH_RATIO = 0.25
+DEFAULT_FACE_CENTER_X_RATIO = 0.5
+DEFAULT_FACE_BOTTOM_Y_RATIO = 0.5
 
 
 @dataclass(frozen=True)
@@ -32,13 +35,9 @@ class AutoCropTemplate:
     name: str = DEFAULT_AUTOCROP_TEMPLATE_NAME
     detector_mode: str = "mediapipe_face"
     crop_mode: str = "square"
-    top_buffer: float = 0.55
-    bottom_buffer: float = 0.55
-    left_buffer: float = 0.55
-    right_buffer: float = 0.55
-    scale_multiplier: float = 1.0
-    anchor_x: float = 0.5
-    anchor_y: float = 0.5
+    face_width_ratio: float = DEFAULT_FACE_WIDTH_RATIO
+    face_center_x_ratio: float = DEFAULT_FACE_CENTER_X_RATIO
+    face_bottom_y_ratio: float = DEFAULT_FACE_BOTTOM_Y_RATIO
     min_detection_confidence: float = DEFAULT_MIN_DETECTION_CONFIDENCE
 
     def to_dict(self) -> dict[str, Any]:
@@ -46,13 +45,9 @@ class AutoCropTemplate:
             "name": self.name,
             "detector_mode": self.detector_mode,
             "crop_mode": self.crop_mode,
-            "top_buffer": self.top_buffer,
-            "bottom_buffer": self.bottom_buffer,
-            "left_buffer": self.left_buffer,
-            "right_buffer": self.right_buffer,
-            "scale_multiplier": self.scale_multiplier,
-            "anchor_x": self.anchor_x,
-            "anchor_y": self.anchor_y,
+            "face_width_ratio": self.face_width_ratio,
+            "face_center_x_ratio": self.face_center_x_ratio,
+            "face_bottom_y_ratio": self.face_bottom_y_ratio,
             "min_detection_confidence": self.min_detection_confidence,
         }
 
@@ -74,17 +69,38 @@ class AutoCropTemplate:
         name = str(data.get("name", DEFAULT_AUTOCROP_TEMPLATE_NAME)).strip() or DEFAULT_AUTOCROP_TEMPLATE_NAME
         detector_mode = str(data.get("detector_mode", "mediapipe_face")).strip() or "mediapipe_face"
         crop_mode = str(data.get("crop_mode", "square")).strip() or "square"
+
+        legacy_left = _float("left_buffer", 0.55, min_value=0.0, max_value=5.0)
+        legacy_right = _float("right_buffer", 0.55, min_value=0.0, max_value=5.0)
+        legacy_top = _float("top_buffer", 0.55, min_value=0.0, max_value=5.0)
+        legacy_bottom = _float("bottom_buffer", 0.55, min_value=0.0, max_value=5.0)
+        legacy_scale = _float("scale_multiplier", 1.0, min_value=0.25, max_value=5.0)
+        legacy_anchor_x = _float("anchor_x", 0.5, min_value=0.0, max_value=1.0)
+        legacy_anchor_y = _float("anchor_y", 0.5, min_value=0.0, max_value=1.0)
+
+        has_new_positioning = any(
+            key in data
+            for key in ("face_width_ratio", "face_center_x_ratio", "face_bottom_y_ratio")
+        )
+
+        if has_new_positioning:
+            face_width_ratio = _float("face_width_ratio", DEFAULT_FACE_WIDTH_RATIO, min_value=0.05, max_value=0.9)
+            face_center_x_ratio = _float("face_center_x_ratio", DEFAULT_FACE_CENTER_X_RATIO, min_value=0.0, max_value=1.0)
+            face_bottom_y_ratio = _float("face_bottom_y_ratio", DEFAULT_FACE_BOTTOM_Y_RATIO, min_value=0.0, max_value=1.0)
+        else:
+            legacy_rect_w = 1.0 + legacy_left + legacy_right
+            face_width_ratio = DEFAULT_FACE_WIDTH_RATIO / max(0.01, legacy_rect_w * legacy_scale)
+            face_width_ratio = max(0.05, min(0.9, face_width_ratio))
+            face_center_x_ratio = max(0.0, min(1.0, legacy_anchor_x))
+            face_bottom_y_ratio = max(0.0, min(1.0, legacy_anchor_y + ((0.5 - legacy_anchor_y) + (legacy_bottom * 0.5))))
+
         return cls(
             name=name,
             detector_mode=detector_mode,
             crop_mode=crop_mode,
-            top_buffer=_float("top_buffer", 0.55, min_value=0.0, max_value=5.0),
-            bottom_buffer=_float("bottom_buffer", 0.55, min_value=0.0, max_value=5.0),
-            left_buffer=_float("left_buffer", 0.55, min_value=0.0, max_value=5.0),
-            right_buffer=_float("right_buffer", 0.55, min_value=0.0, max_value=5.0),
-            scale_multiplier=_float("scale_multiplier", 1.0, min_value=0.25, max_value=5.0),
-            anchor_x=_float("anchor_x", 0.5, min_value=0.0, max_value=1.0),
-            anchor_y=_float("anchor_y", 0.5, min_value=0.0, max_value=1.0),
+            face_width_ratio=face_width_ratio,
+            face_center_x_ratio=face_center_x_ratio,
+            face_bottom_y_ratio=face_bottom_y_ratio,
             min_detection_confidence=_float(
                 "min_detection_confidence",
                 DEFAULT_MIN_DETECTION_CONFIDENCE,
@@ -184,6 +200,44 @@ def _square_to_suggestion(
     return AutoCropSuggestion(
         scale=scale,
         offset=[round(-x * scale), round(-y * scale)],
+        method=method,
+        status=status,
+        status_message=status_message,
+        face_bounds=face_bounds,
+    )
+
+
+def _face_bounds_to_suggestion(
+    source_img: Any,
+    crop_size: tuple[int, int],
+    *,
+    face_bounds: tuple[float, float, float, float],
+    face_width_ratio: float,
+    face_center_x_ratio: float,
+    face_bottom_y_ratio: float,
+    method: str,
+    status: str = "ok",
+    status_message: str = "",
+) -> AutoCropSuggestion:
+    crop_w, crop_h = crop_size
+    face_x, face_y, face_w, face_h = face_bounds
+    if face_w <= 0 or face_h <= 0:
+        return _default_centered_suggestion(source_img, crop_size)
+
+    desired_face_width = max(1.0, crop_w * face_width_ratio)
+    scale = max(desired_face_width / face_w, crop_h / max(float(source_img.height), 1.0) * 0.01)
+
+    target_center_x = crop_w * face_center_x_ratio
+    target_bottom_y = crop_h * face_bottom_y_ratio
+    face_center_x = face_x + face_w / 2.0
+    face_bottom_y = face_y + face_h
+
+    offset_x = target_center_x - (face_center_x * scale)
+    offset_y = target_bottom_y - (face_bottom_y * scale)
+
+    return AutoCropSuggestion(
+        scale=scale,
+        offset=[round(offset_x), round(offset_y)],
         method=method,
         status=status,
         status_message=status_message,
@@ -429,27 +483,17 @@ def suggest_button_autocrop_from_template(
             status_message="No face was detected; using centered fallback and ignoring face controls.",
         )
 
-    face_x, face_y, face_w, face_h = face_bounds
-    rect_x = face_x - face_w * template_obj.left_buffer
-    rect_y = face_y - face_h * template_obj.top_buffer
-    rect_w = face_w * (1.0 + template_obj.left_buffer + template_obj.right_buffer)
-    rect_h = face_h * (1.0 + template_obj.top_buffer + template_obj.bottom_buffer)
-    square_size = max(rect_w, rect_h) * template_obj.scale_multiplier
-    anchor_x = rect_x + rect_w * template_obj.anchor_x
-    anchor_y = rect_y + rect_h * template_obj.anchor_y
-    square_x = anchor_x - square_size / 2
-    square_y = anchor_y - square_size / 2
     logger.info("Template '%s': face crop applied.", template_obj.name)
-    return _square_to_suggestion(
+    return _face_bounds_to_suggestion(
         source_img,
         crop_size,
-        x=square_x,
-        y=square_y,
-        size=square_size,
+        face_bounds=face_bounds,
+        face_width_ratio=template_obj.face_width_ratio,
+        face_center_x_ratio=template_obj.face_center_x_ratio,
+        face_bottom_y_ratio=template_obj.face_bottom_y_ratio,
         method=f"template:{template_obj.name}",
         status="face_crop_applied",
         status_message="Face detected; face controls are applied.",
-        face_bounds=face_bounds,
     )
 
 
@@ -467,8 +511,8 @@ def suggest_button_autocrop(source_img: Any, crop_size: tuple[int, int]) -> Auto
             status="mediapipe_unavailable",
             status_message=f"{reason} Using centered fallback.",
         )
-    square = detector.detect_square(source_img)
-    if not square:
+    face_bounds = detector.detect_face_bounds(source_img)
+    if not face_bounds:
         logger.warning("No face detected by local MediaPipe Tasks; using centered fallback crop.")
         return AutoCropSuggestion(
             scale=fallback.scale,
@@ -477,14 +521,14 @@ def suggest_button_autocrop(source_img: Any, crop_size: tuple[int, int]) -> Auto
             status="no_face_detected",
             status_message="No face was detected; using centered fallback.",
         )
-    x, y, size = square
-    logger.info("Local MediaPipe face crop applied with square x=%.1f y=%.1f size=%.1f.", x, y, size)
-    return _square_to_suggestion(
+    logger.info("Local MediaPipe face crop applied using direct face placement.")
+    return _face_bounds_to_suggestion(
         source_img,
         crop_size,
-        x=x,
-        y=y,
-        size=size,
+        face_bounds=face_bounds,
+        face_width_ratio=DEFAULT_FACE_WIDTH_RATIO,
+        face_center_x_ratio=DEFAULT_FACE_CENTER_X_RATIO,
+        face_bottom_y_ratio=DEFAULT_FACE_BOTTOM_Y_RATIO,
         method="mediapipe-face",
         status="face_crop_applied",
         status_message="Face detected; face crop applied.",
