@@ -106,6 +106,16 @@ class PrintJob:
     routed_printer: str | None = None
     address: "ShippingAddress | None" = None
     label_options: dict[str, Any] = field(default_factory=dict)
+    # Optional custom crop/position settings for photo prints (4x6, 5x7, 8x10).
+    # When all three are at their defaults (scale=1.0, offsets=0) the existing
+    # center-crop behaviour is preserved.
+    crop_scale: float = 1.0
+    crop_offset_x: float = 0.0
+    crop_offset_y: float = 0.0
+    # Order id reference, if available (used for queue persistence).
+    order_id: str = ""
+    # Queue item id this job was created from, if any.
+    queue_item_id: int | None = None
 
 
 @dataclass

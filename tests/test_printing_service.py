@@ -185,6 +185,95 @@ class CenterCropTests(unittest.TestCase):
         result = self.service._center_crop_to_print_ratio(img, "5x7")
         self.assertEqual(result.size, (500, 700))
 
+    # --- Custom crop offset / scale ---
+
+    def test_default_params_produce_same_output_as_plain_call(self):
+        """Passing default crop_scale/offset values must yield the same result as no params."""
+        img = _make_image(2000, 3000, color="blue")
+        result_plain = self.service._center_crop_to_print_ratio(img, "5x7")
+        result_defaults = self.service._center_crop_to_print_ratio(
+            img, "5x7", crop_scale=1.0, crop_offset_x=0.0, crop_offset_y=0.0
+        )
+        self.assertEqual(result_plain.size, result_defaults.size)
+        # Pixel comparison: should be identical.
+        from PIL import ImageChops
+        diff = ImageChops.difference(result_plain, result_defaults)
+        self.assertEqual(diff.getbbox(), None)
+
+    def test_crop_scale_zoom_in_produces_smaller_output(self):
+        """A scale > 1.0 zooms in (larger source before crop) — output ratio is unchanged."""
+        img = _make_image(2000, 3000)
+        result = self.service._center_crop_to_print_ratio(img, "4x6", crop_scale=1.5)
+        # Output ratio should still be 4x6 (2:3)
+        self._assert_ratio(result.width, result.height, 2, 3)
+
+    def test_crop_offset_x_shifts_right(self):
+        """A positive crop_offset_x shifts the crop window toward the right."""
+        # Use a wider landscape image than 4x6 (3:2) so horizontal slack exists.
+        # A 4:2 (2:1) image cropped to 3:2 will have leftover width.
+        img = _make_image(4000, 2000, color="red")
+        # Paint a small green patch on the far right
+        from PIL import ImageDraw
+        draw = ImageDraw.Draw(img)
+        draw.rectangle([(3900, 0), (4000, 2000)], fill="green")
+        # Default crop (centered) should not include the green edge.
+        result_center = self.service._center_crop_to_print_ratio(img, "4x6", crop_offset_x=0.0)
+        # Shift right — the green patch should appear somewhere.
+        result_shifted = self.service._center_crop_to_print_ratio(img, "4x6", crop_offset_x=1000.0)
+        # Results should differ.
+        from PIL import ImageChops
+        diff = ImageChops.difference(result_center, result_shifted)
+        self.assertIsNotNone(diff.getbbox())
+
+    def test_crop_offset_y_shifts_down(self):
+        """A positive crop_offset_y shifts the crop window downward."""
+        img = _make_image(2000, 3000, color="red")
+        from PIL import ImageDraw
+        draw = ImageDraw.Draw(img)
+        draw.rectangle([(0, 2900), (2000, 3000)], fill="blue")
+        result_center = self.service._center_crop_to_print_ratio(img, "5x7", crop_offset_y=0.0)
+        result_shifted = self.service._center_crop_to_print_ratio(img, "5x7", crop_offset_y=500.0)
+        from PIL import ImageChops
+        diff = ImageChops.difference(result_center, result_shifted)
+        self.assertIsNotNone(diff.getbbox())
+
+    def test_prepare_image_for_job_passes_crop_params(self):
+        """_prepare_image_for_job should forward crop_scale/offset from the job."""
+        import os
+        import tempfile
+
+        img = _make_image(2000, 3000, color="red")
+        from PIL import ImageDraw
+        draw = ImageDraw.Draw(img)
+        draw.rectangle([(0, 2900), (2000, 3000)], fill="blue")
+        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
+            img.save(tmp.name, format="JPEG")
+            tmp_path = tmp.name
+
+        try:
+            job_default = PrintJob(
+                source_type="file",
+                source=tmp_path,
+                display_name="test.jpg",
+                product="5x7",
+                size_key="5x7",
+            )
+            job_shifted = PrintJob(
+                source_type="file",
+                source=tmp_path,
+                display_name="test.jpg",
+                product="5x7",
+                size_key="5x7",
+                crop_offset_y=500.0,
+            )
+            result_default = self.service._prepare_image_for_job(job_default)
+            result_shifted = self.service._prepare_image_for_job(job_shifted)
+            from PIL import ImageChops
+            diff = ImageChops.difference(result_default, result_shifted)
+            self.assertIsNotNone(diff.getbbox())
+        finally:
+            os.unlink(tmp_path)
+
     # --- prepare_image_for_job integration ---
 
     def test_prepare_image_for_job_crops_non_wallet(self):

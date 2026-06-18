@@ -20,6 +20,7 @@ from data_loader import HAS_MYSQL, SytistDataLoader
 from dialogs import Dialogs
 from export_service import ExportService, _safe_qty
 from models import CartItem, Order, PackageDetails, PhotoPath, PrintJob, ShippingAddress
+from print_queue_store import PrintQueueStore, STATUS_QUEUED
 from printing_service import (
     BUTTON_CROP_SIZE,
     BUTTON_DEFAULT_DIAMETER,
@@ -86,6 +87,7 @@ class SytistDashboard:
         # Shared SQLite database for action logs and product-type mappings.
         self.action_log_store = ActionLogStore("sytist_actions.db")
         self.product_type_manager = ProductTypeManager("sytist_actions.db")
+        self.print_queue_store = PrintQueueStore("sytist_actions.db")
 
         self.orders: list[Order] = []
         self.cart_items: list[CartItem] = []
@@ -339,6 +341,7 @@ class SytistDashboard:
         ttk.Button(row_printing, text="Create Button Print", command=self.open_button_print_editor).pack(side=tk.LEFT, padx=5)
         ttk.Button(row_printing, text="Print 4x6 Address", command=self.open_address_print_dialog).pack(side=tk.LEFT, padx=5)
         ttk.Button(row_printing, text="Product Types", command=self.open_product_type_manager).pack(side=tk.LEFT, padx=5)
+        ttk.Button(row_printing, text="Open Print Queue", command=self.open_print_queue).pack(side=tk.LEFT, padx=5)
 
         row_usps = ttk.LabelFrame(control_frame, text="USPS", padding=(6, 2))
         row_usps.pack(fill=tk.X, pady=2)
@@ -1321,8 +1324,43 @@ class SytistDashboard:
                         display_name=item.file or "photo",
                         product=item.product,
                         size_key=size_key,
+                        order_id=str(order.id),
                     ))
         return jobs
+
+    def _enqueue_jobs(self, jobs: list) -> list[int]:
+        """Persist a list of PrintJob objects to the print queue.
+
+        Returns the list of new queue item ids in the same order as *jobs*.
+        """
+        ids = []
+        for job in jobs:
+            render_settings: dict = {}
+            if getattr(job, "crop_scale", 1.0) != 1.0:
+                render_settings["crop_scale"] = job.crop_scale
+            if getattr(job, "crop_offset_x", 0.0) != 0.0:
+                render_settings["crop_offset_x"] = job.crop_offset_x
+            if getattr(job, "crop_offset_y", 0.0) != 0.0:
+                render_settings["crop_offset_y"] = job.crop_offset_y
+            # Persist label options for address jobs
+            if job.source_type == "address" and job.label_options:
+                render_settings["label_options"] = job.label_options
+                if job.address:
+                    from dataclasses import asdict
+                    render_settings["address"] = asdict(job.address)
+            item_id = self.print_queue_store.enqueue(
+                source_type=job.source_type,
+                source=job.source if isinstance(job.source, str) else "",
+                display_name=job.display_name,
+                product=job.product or "",
+                size_key=job.size_key or "",
+                order_id=getattr(job, "order_id", "") or "",
+                routed_printer=job.routed_printer or "",
+                render_settings=render_settings or None,
+            )
+            job.queue_item_id = item_id
+            ids.append(item_id)
+        return ids
 
     def print_selected_orders(self):
         if not HAS_WIN32 or not HAS_PIL:
@@ -1345,6 +1383,7 @@ class SytistDashboard:
         )
 
         jobs = self.build_order_print_jobs(selected_orders)
+        self._enqueue_jobs(jobs)
         self.start_print_workflow(jobs, "Order Print")
 
     def open_product_type_manager(self) -> None:
@@ -1526,6 +1565,7 @@ class SytistDashboard:
             return
 
         jobs = self.build_file_print_jobs(filepaths, chosen_type)
+        self._enqueue_jobs(jobs)
         self.start_print_workflow(jobs, "Image File Print")
 
     def open_button_print_editor(self):
@@ -1560,6 +1600,7 @@ class SytistDashboard:
             "drag_start": None,
             "photo": None,
             "offset": [0, 0],
+            "image_path": filepath,
         }
         crop_w, crop_h = BUTTON_CROP_SIZE
         sheet_w, sheet_h = BUTTON_PRINT_SIZE
@@ -1937,6 +1978,46 @@ class SytistDashboard:
             except Exception as exc:
                 messagebox.showerror("Load Error", f"Could not load template:\n{exc}")
 
+        def _collect_button_specs():
+            """Return a dict of all current button designer settings."""
+            return {
+                "image_path": state.get("image_path", ""),
+                "scale": state["scale"],
+                "offset": list(state["offset"]),
+                "outer_diameter": outer_diameter_var.get(),
+                "finished_diameter": finished_diameter_var.get(),
+                "print_finished_circle": print_finished_var.get(),
+                "print_lime_calibration_rectangle": print_lime_rect_var.get(),
+                "lime_rectangle_width": lime_rect_width_var.get(),
+                "circle_offset_x": circle_offset_x_var.get(),
+                "circle_offset_y": circle_offset_y_var.get(),
+                "edge_border": edge_border_var.get(),
+                "print_params": print_params_var.get(),
+                "text": text_var.get(),
+                "position": position_var.get(),
+                "facing": facing_var.get(),
+                "font": font_var.get(),
+                "font_size": font_size_var.get(),
+                "text_color": text_color_var.get(),
+                "text_style": text_style_var.get(),
+                "char_spacing": char_spacing_var.get(),
+                "radius_offset": radius_offset_var.get(),
+                "stroke_color": stroke_color_var.get(),
+                "stroke_width": stroke_width_var.get(),
+            }
+
+        def add_button_to_queue():
+            specs = _collect_button_specs()
+            item_id = self.print_queue_store.enqueue(
+                source_type="button",
+                source=state.get("image_path", ""),
+                display_name=f"Button - {state['image_name']}",
+                product="Button",
+                size_key="button",
+                render_settings={"button_specs": specs},
+            )
+            messagebox.showinfo("Queued", f"Button job added to print queue (ID {item_id}).", parent=top)
+
         def print_button_sheet():
             if not HAS_WIN32:
                 messagebox.showerror("Missing Library", "Please run: pip install pywin32")
@@ -1948,17 +2029,896 @@ class SytistDashboard:
                 product="Button",
                 size_key="button",
             )
+            # Enqueue with button specs for reprint support.
+            specs = _collect_button_specs()
+            self.print_queue_store.enqueue(
+                source_type="button",
+                source=state.get("image_path", ""),
+                display_name=job.display_name,
+                product="Button",
+                size_key="button",
+                render_settings={"button_specs": specs},
+            )
             self.start_print_workflow([job], "Button Print")
 
         ttk.Button(button_row, text="Save 4x6 PNG", command=save_button_sheet).pack(side=tk.LEFT, padx=4)
         ttk.Button(button_row, text="Print", command=print_button_sheet).pack(side=tk.LEFT, padx=4)
+        ttk.Button(button_row, text="Add to Queue", command=add_button_to_queue).pack(side=tk.LEFT, padx=4)
         ttk.Button(button_row, text="Save Template", command=save_template).pack(side=tk.LEFT, padx=4)
         ttk.Button(button_row, text="Load Template", command=load_template).pack(side=tk.LEFT, padx=4)
         ttk.Button(button_row, text="Close", command=top.destroy).pack(side=tk.RIGHT, padx=4)
 
         redraw()
 
-    def get_address_prefill_order(self):
+    def open_button_print_editor_from_specs(self, specs: dict) -> None:
+        """Reopen the button designer with a saved spec dict restored.
+
+        *specs* is the ``button_specs`` dict persisted in a queue item's
+        ``render_settings``.  This reconstructs the editor state exactly so the
+        user can review and reprint.
+        """
+        if not HAS_PIL or Image is None or ImageTk is None:
+            messagebox.showerror("Missing Library", "Please run 'pip install pillow' to use the button editor.")
+            return
+
+        image_path = specs.get("image_path", "")
+        if not image_path or not os.path.isfile(image_path):
+            # Let the user locate the image manually.
+            image_path = filedialog.askopenfilename(
+                title="Locate Button Image",
+                filetypes=[
+                    ("Image Files", "*.jpg *.jpeg *.png *.tif *.tiff *.bmp"),
+                    ("All Files", "*.*"),
+                ],
+            )
+            if not image_path:
+                return
+
+        try:
+            source_img = Image.open(image_path).convert("RGB")
+        except Exception as exc:
+            messagebox.showerror("Image Error", f"Could not open image:\n{exc}")
+            return
+
+        top = tk.Toplevel(self.root)
+        top.title("Create Button Print")
+        top.geometry("980x820")
+        top.transient(self.root)
+
+        crop_w, crop_h = BUTTON_CROP_SIZE
+        sheet_w, sheet_h = BUTTON_PRINT_SIZE
+        initial_scale = max(crop_w / source_img.width, crop_h / source_img.height)
+
+        saved_scale = specs.get("scale", initial_scale)
+        saved_offset = specs.get("offset", None)
+        if saved_offset is None:
+            resized_w = round(source_img.width * initial_scale)
+            resized_h = round(source_img.height * initial_scale)
+            saved_offset = [
+                round((crop_w - resized_w) / 2),
+                round((crop_h - resized_h) / 2),
+            ]
+
+        state = {
+            "source": source_img,
+            "image_name": os.path.basename(image_path),
+            "drag_start": None,
+            "photo": None,
+            "offset": list(saved_offset),
+            "scale": saved_scale,
+            "image_path": image_path,
+        }
+
+        ttk.Label(
+            top,
+            text="Drag the image inside the button circle. Adjust the template, finished button guide, and curved text before saving or printing.",
+            wraplength=900,
+            justify=tk.CENTER,
+        ).pack(pady=(12, 6))
+
+        editor_frame = ttk.Frame(top)
+        editor_frame.pack(fill=tk.BOTH, expand=True, padx=12, pady=8)
+
+        canvas_w, canvas_h = 420, 620
+        page_x, page_y = 10, 10
+        preview_w, preview_h = 400, 600
+        preview_ratio = sheet_w / preview_w
+        crop_preview_y = page_y + ((sheet_h - crop_h) // 2) / preview_ratio
+
+        canvas = tk.Canvas(editor_frame, width=canvas_w, height=canvas_h, background="#d9d9d9", highlightthickness=0)
+        canvas.pack(side=tk.LEFT, padx=(0, 14), pady=0)
+
+        controls = ttk.Frame(editor_frame)
+        controls.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        zoom_pct = (saved_scale / initial_scale) * 100 if initial_scale > 0 else 100
+        zoom_var = tk.DoubleVar(value=zoom_pct)
+        zoom_label = ttk.Label(controls, text=f"Zoom: {zoom_pct:.0f}%")
+        zoom_label.pack(anchor="w")
+        ttk.Scale(controls, from_=50, to=250, orient=tk.HORIZONTAL, variable=zoom_var).pack(fill=tk.X, pady=(0, 10))
+
+        outer_diameter_var = tk.StringVar(value=str(specs.get("outer_diameter", BUTTON_DEFAULT_DIAMETER)))
+        finished_diameter_var = tk.StringVar(value=str(specs.get("finished_diameter", BUTTON_DEFAULT_FINISHED_DIAMETER)))
+        print_finished_var = tk.BooleanVar(value=bool(specs.get("print_finished_circle", True)))
+        print_lime_rect_var = tk.BooleanVar(value=bool(specs.get("print_lime_calibration_rectangle", False)))
+        lime_rect_width_var = tk.StringVar(value=str(specs.get("lime_rectangle_width", BUTTON_PRINT_SIZE[0])))
+        circle_offset_x_var = tk.StringVar(value=str(specs.get("circle_offset_x", "0")))
+        circle_offset_y_var = tk.StringVar(value=str(specs.get("circle_offset_y", "0")))
+        edge_border_var = tk.BooleanVar(value=bool(specs.get("edge_border", False)))
+        print_params_var = tk.BooleanVar(value=bool(specs.get("print_params", False)))
+        text_var = tk.StringVar(value=str(specs.get("text", "")))
+        position_var = tk.StringVar(value=str(specs.get("position", "top")))
+        facing_var = tk.StringVar(value=str(specs.get("facing", "outward")))
+        font_size_var = tk.StringVar(value=str(specs.get("font_size", "72")))
+        text_color_var = tk.StringVar(value=str(specs.get("text_color", "#000000")))
+        text_style_var = tk.StringVar(value=str(specs.get("text_style", "Regular")))
+        char_spacing_var = tk.StringVar(value=str(specs.get("char_spacing", "0")))
+        radius_offset_var = tk.StringVar(value=str(specs.get("radius_offset", "0")))
+        stroke_color_var = tk.StringVar(value=str(specs.get("stroke_color", "#000000")))
+        stroke_width_var = tk.StringVar(value=str(specs.get("stroke_width", "0")))
+        try:
+            font_values = sorted(tkfont.families(root=top))
+        except Exception:
+            font_values = []
+        font_var = tk.StringVar(value=str(specs.get("font", "Arial" if "Arial" in font_values else "DejaVuSans.ttf")))
+
+        def choose_text_color():
+            _, color = colorchooser.askcolor(color=text_color_var.get() or "#000000", parent=top)
+            if color:
+                text_color_var.set(color)
+
+        def choose_stroke_color():
+            _, color = colorchooser.askcolor(color=stroke_color_var.get() or "#000000", parent=top)
+            if color:
+                stroke_color_var.set(color)
+
+        template_frame = ttk.LabelFrame(controls, text="Template circles", padding=8)
+        template_frame.pack(fill=tk.X, pady=(0, 6))
+        ttk.Label(template_frame, text="Outer circle diameter (px):").grid(row=0, column=0, sticky="w", pady=3)
+        ttk.Spinbox(template_frame, from_=50, to=min(BUTTON_CROP_SIZE), increment=1, textvariable=outer_diameter_var, width=10).grid(row=0, column=1, sticky="w", padx=6, pady=3)
+        ttk.Label(template_frame, text="Finished red circle diameter (px):").grid(row=1, column=0, sticky="w", pady=3)
+        ttk.Spinbox(template_frame, from_=50, to=min(BUTTON_CROP_SIZE), increment=1, textvariable=finished_diameter_var, width=10).grid(row=1, column=1, sticky="w", padx=6, pady=3)
+        ttk.Checkbutton(template_frame, text="Print red finished-button circle", variable=print_finished_var).grid(row=2, column=0, columnspan=2, sticky="w", pady=3)
+        ttk.Checkbutton(template_frame, text="Print lime green 2:3 calibration rectangle", variable=print_lime_rect_var).grid(row=3, column=0, columnspan=2, sticky="w", pady=3)
+        ttk.Label(template_frame, text="Lime rectangle width (px):").grid(row=4, column=0, sticky="w", pady=3)
+        ttk.Spinbox(template_frame, from_=1, to=BUTTON_PRINT_SIZE[0], increment=1, textvariable=lime_rect_width_var, width=10).grid(row=4, column=1, sticky="w", padx=6, pady=3)
+        ttk.Checkbutton(template_frame, text="Yellow edge border around main circle", variable=edge_border_var).grid(row=5, column=0, columnspan=2, sticky="w", pady=3)
+        ttk.Checkbutton(template_frame, text="Print parameters on output", variable=print_params_var).grid(row=6, column=0, columnspan=2, sticky="w", pady=3)
+
+        circle_pos_frame = ttk.LabelFrame(controls, text="Circle position (D-pad)", padding=8)
+        circle_pos_frame.pack(fill=tk.X, pady=(0, 6))
+        ttk.Label(circle_pos_frame, text="Offset X (px):").grid(row=0, column=0, sticky="w", pady=2)
+        ttk.Spinbox(circle_pos_frame, from_=-min(BUTTON_CROP_SIZE), to=min(BUTTON_CROP_SIZE), increment=1, textvariable=circle_offset_x_var, width=8).grid(row=0, column=1, sticky="w", padx=6, pady=2)
+        ttk.Label(circle_pos_frame, text="Offset Y (px):").grid(row=0, column=2, sticky="w", pady=2)
+        ttk.Spinbox(circle_pos_frame, from_=-min(BUTTON_CROP_SIZE), to=min(BUTTON_CROP_SIZE), increment=1, textvariable=circle_offset_y_var, width=8).grid(row=0, column=3, sticky="w", padx=6, pady=2)
+
+        dpad_frame = ttk.Frame(circle_pos_frame)
+        dpad_frame.grid(row=1, column=0, columnspan=4, pady=4)
+        ttk.Label(dpad_frame, text="Step (px):").grid(row=0, column=0, sticky="e", padx=(0, 4))
+        dpad_step_var = tk.StringVar(value="10")
+        ttk.Spinbox(dpad_frame, from_=1, to=200, increment=1, textvariable=dpad_step_var, width=6).grid(row=0, column=1, sticky="w")
+
+        def _dpad_move(dx, dy):
+            try:
+                step = max(1, int(round(float(dpad_step_var.get()))))
+            except (TypeError, ValueError):
+                step = 10
+            try:
+                x = int(round(float(circle_offset_x_var.get())))
+            except (TypeError, ValueError):
+                x = 0
+            try:
+                y = int(round(float(circle_offset_y_var.get())))
+            except (TypeError, ValueError):
+                y = 0
+            circle_offset_x_var.set(str(x + dx * step))
+            circle_offset_y_var.set(str(y + dy * step))
+
+        ttk.Button(dpad_frame, text="↑", width=3, command=lambda: _dpad_move(0, -1)).grid(row=1, column=2, padx=2, pady=1)
+        ttk.Button(dpad_frame, text="←", width=3, command=lambda: _dpad_move(-1, 0)).grid(row=2, column=1, padx=2, pady=1)
+        ttk.Button(dpad_frame, text="●", width=3, command=lambda: [circle_offset_x_var.set("0"), circle_offset_y_var.set("0")]).grid(row=2, column=2, padx=2, pady=1)
+        ttk.Button(dpad_frame, text="→", width=3, command=lambda: _dpad_move(1, 0)).grid(row=2, column=3, padx=2, pady=1)
+        ttk.Button(dpad_frame, text="↓", width=3, command=lambda: _dpad_move(0, 1)).grid(row=3, column=2, padx=2, pady=1)
+
+        text_frame = ttk.LabelFrame(controls, text="Curved text", padding=8)
+        text_frame.pack(fill=tk.X)
+        ttk.Label(text_frame, text="Text:").grid(row=0, column=0, sticky="w", pady=3)
+        ttk.Entry(text_frame, textvariable=text_var, width=35).grid(row=0, column=1, columnspan=3, sticky="ew", padx=6, pady=3)
+        ttk.Label(text_frame, text="Position:").grid(row=1, column=0, sticky="w", pady=3)
+        ttk.Combobox(text_frame, textvariable=position_var, values=["top", "right", "bottom", "left"], state="readonly", width=12).grid(row=1, column=1, sticky="w", padx=6, pady=3)
+        ttk.Label(text_frame, text="Facing:").grid(row=1, column=2, sticky="w", pady=3)
+        ttk.Combobox(text_frame, textvariable=facing_var, values=["outward", "inward"], state="readonly", width=12).grid(row=1, column=3, sticky="w", padx=6, pady=3)
+        ttk.Label(text_frame, text="Font:").grid(row=2, column=0, sticky="w", pady=3)
+        ttk.Combobox(text_frame, textvariable=font_var, values=font_values, width=30).grid(row=2, column=1, columnspan=3, sticky="ew", padx=6, pady=3)
+        ttk.Label(text_frame, text="Size:").grid(row=3, column=0, sticky="w", pady=3)
+        ttk.Spinbox(text_frame, from_=6, to=240, increment=1, textvariable=font_size_var, width=8).grid(row=3, column=1, sticky="w", padx=6, pady=3)
+        ttk.Label(text_frame, text="Color:").grid(row=3, column=2, sticky="w", pady=3)
+        ttk.Entry(text_frame, textvariable=text_color_var, width=12).grid(row=3, column=3, sticky="w", padx=6, pady=3)
+        ttk.Button(text_frame, text="Choose", command=choose_text_color).grid(row=3, column=4, sticky="w", pady=3)
+        ttk.Label(text_frame, text="Style:").grid(row=4, column=0, sticky="w", pady=3)
+        ttk.Combobox(text_frame, textvariable=text_style_var, values=["Regular", "Bold", "Italic", "Bold Italic"], state="readonly", width=12).grid(row=4, column=1, sticky="w", padx=6, pady=3)
+        ttk.Label(text_frame, text="Character spacing:").grid(row=4, column=2, sticky="w", pady=3)
+        ttk.Spinbox(text_frame, from_=-20, to=80, increment=1, textvariable=char_spacing_var, width=8).grid(row=4, column=3, sticky="w", padx=6, pady=3)
+        ttk.Label(text_frame, text="Text inset from edge:").grid(row=5, column=0, sticky="w", pady=3)
+        ttk.Spinbox(text_frame, from_=-100, to=400, increment=1, textvariable=radius_offset_var, width=8).grid(row=5, column=1, sticky="w", padx=6, pady=3)
+        ttk.Label(text_frame, text="Stroke color:").grid(row=6, column=0, sticky="w", pady=3)
+        ttk.Entry(text_frame, textvariable=stroke_color_var, width=12).grid(row=6, column=1, sticky="w", padx=6, pady=3)
+        ttk.Button(text_frame, text="Choose", command=choose_stroke_color).grid(row=6, column=2, sticky="w", pady=3)
+        ttk.Label(text_frame, text="Stroke width (px):").grid(row=7, column=0, sticky="w", pady=3)
+        ttk.Spinbox(text_frame, from_=0, to=40, increment=1, textvariable=stroke_width_var, width=8).grid(row=7, column=1, sticky="w", padx=6, pady=3)
+        text_frame.columnconfigure(1, weight=1)
+
+        def render_current_sheet_specs():
+            try:
+                cx_off = int(round(float(circle_offset_x_var.get())))
+            except (TypeError, ValueError):
+                cx_off = 0
+            try:
+                cy_off = int(round(float(circle_offset_y_var.get())))
+            except (TypeError, ValueError):
+                cy_off = 0
+            return self.printing_service.render_button_sheet(
+                state["source"],
+                scale=state["scale"],
+                offset=state["offset"],
+                circle_diameter=outer_diameter_var.get(),
+                finished_diameter=finished_diameter_var.get(),
+                print_finished_circle=print_finished_var.get(),
+                print_lime_calibration_rectangle=print_lime_rect_var.get(),
+                lime_rectangle_width=lime_rect_width_var.get(),
+                circle_offset=(cx_off, cy_off),
+                edge_border=edge_border_var.get(),
+                print_params=print_params_var.get(),
+                curved_text={
+                    "text": text_var.get(),
+                    "position": position_var.get(),
+                    "inward": facing_var.get() == "inward",
+                    "font_family": font_var.get(),
+                    "font_size": font_size_var.get(),
+                    "color": text_color_var.get(),
+                    "style": text_style_var.get(),
+                    "char_spacing": char_spacing_var.get(),
+                    "radius_offset": radius_offset_var.get(),
+                    "stroke_color": stroke_color_var.get(),
+                    "stroke_width": stroke_width_var.get(),
+                },
+            )
+
+        def redraw_specs():
+            sheet = render_current_sheet_specs()
+            preview = sheet.resize((preview_w, preview_h), Image.Resampling.LANCZOS)
+            photo = ImageTk.PhotoImage(preview)
+            state["photo"] = photo
+            canvas.delete("all")
+            canvas.create_rectangle(page_x - 1, page_y - 1, page_x + preview_w + 1, page_y + preview_h + 1, outline="#888")
+            canvas.create_image(page_x, page_y, anchor=tk.NW, image=photo)
+            try:
+                outer_diameter = int(round(float(outer_diameter_var.get())))
+            except (TypeError, ValueError):
+                outer_diameter = BUTTON_DEFAULT_DIAMETER
+            outer_diameter = max(50, min(outer_diameter, min(BUTTON_CROP_SIZE)))
+            try:
+                cx_off = int(round(float(circle_offset_x_var.get())))
+                cy_off = int(round(float(circle_offset_y_var.get())))
+            except (TypeError, ValueError):
+                cx_off = cy_off = 0
+            max_dx = (crop_w - outer_diameter) // 2
+            max_dy = (crop_h - outer_diameter) // 2
+            cx_off = max(-max_dx, min(cx_off, max_dx))
+            cy_off = max(-max_dy, min(cy_off, max_dy))
+            crop_preview_size = outer_diameter / preview_ratio
+            crop_preview_x = page_x + ((crop_w - outer_diameter) / 2 + cx_off) / preview_ratio
+            crop_preview_y_dynamic = crop_preview_y + ((crop_h - outer_diameter) / 2 + cy_off) / preview_ratio
+            canvas.create_oval(
+                crop_preview_x,
+                crop_preview_y_dynamic,
+                crop_preview_x + crop_preview_size,
+                crop_preview_y_dynamic + crop_preview_size,
+                outline="#111",
+                width=2,
+            )
+
+        def set_zoom_specs(value):
+            pct = float(value)
+            old_resized = (
+                source_img.width * state["scale"],
+                source_img.height * state["scale"],
+            )
+            center = (
+                state["offset"][0] + old_resized[0] / 2,
+                state["offset"][1] + old_resized[1] / 2,
+            )
+            state["scale"] = initial_scale * pct / 100
+            new_resized = (
+                source_img.width * state["scale"],
+                source_img.height * state["scale"],
+            )
+            state["offset"] = [
+                round(center[0] - new_resized[0] / 2),
+                round(center[1] - new_resized[1] / 2),
+            ]
+            zoom_label.config(text=f"Zoom: {pct:.0f}%")
+            redraw_specs()
+
+        zoom_var.trace_add("write", lambda *_: set_zoom_specs(zoom_var.get()))
+        for var in [
+            outer_diameter_var, finished_diameter_var, print_finished_var, print_lime_rect_var,
+            lime_rect_width_var, circle_offset_x_var, circle_offset_y_var, edge_border_var,
+            print_params_var, text_var, position_var, facing_var, font_var, font_size_var,
+            text_color_var, text_style_var, char_spacing_var, radius_offset_var,
+            stroke_color_var, stroke_width_var,
+        ]:
+            var.trace_add("write", lambda *_: redraw_specs())
+
+        def on_drag_start_specs(event):
+            state["drag_start"] = (event.x, event.y)
+
+        def on_drag_specs(event):
+            if not state["drag_start"]:
+                return
+            last_x, last_y = state["drag_start"]
+            dx = round((event.x - last_x) * preview_ratio)
+            dy = round((event.y - last_y) * preview_ratio)
+            state["offset"][0] += dx
+            state["offset"][1] += dy
+            state["drag_start"] = (event.x, event.y)
+            redraw_specs()
+
+        canvas.bind("<ButtonPress-1>", on_drag_start_specs)
+        canvas.bind("<B1-Motion>", on_drag_specs)
+
+        button_row2 = ttk.Frame(top)
+        button_row2.pack(fill=tk.X, padx=18, pady=12)
+
+        def _collect_button_specs_2():
+            return {
+                "image_path": state.get("image_path", ""),
+                "scale": state["scale"],
+                "offset": list(state["offset"]),
+                "outer_diameter": outer_diameter_var.get(),
+                "finished_diameter": finished_diameter_var.get(),
+                "print_finished_circle": print_finished_var.get(),
+                "print_lime_calibration_rectangle": print_lime_rect_var.get(),
+                "lime_rectangle_width": lime_rect_width_var.get(),
+                "circle_offset_x": circle_offset_x_var.get(),
+                "circle_offset_y": circle_offset_y_var.get(),
+                "edge_border": edge_border_var.get(),
+                "print_params": print_params_var.get(),
+                "text": text_var.get(),
+                "position": position_var.get(),
+                "facing": facing_var.get(),
+                "font": font_var.get(),
+                "font_size": font_size_var.get(),
+                "text_color": text_color_var.get(),
+                "text_style": text_style_var.get(),
+                "char_spacing": char_spacing_var.get(),
+                "radius_offset": radius_offset_var.get(),
+                "stroke_color": stroke_color_var.get(),
+                "stroke_width": stroke_width_var.get(),
+            }
+
+        def print_button_from_specs():
+            if not HAS_WIN32:
+                messagebox.showerror("Missing Library", "Please run: pip install pywin32")
+                return
+            job = PrintJob(
+                source_type="pil",
+                source=render_current_sheet_specs(),
+                display_name=f"Button - {state['image_name']}",
+                product="Button",
+                size_key="button",
+            )
+            new_specs = _collect_button_specs_2()
+            self.print_queue_store.enqueue(
+                source_type="button",
+                source=state.get("image_path", ""),
+                display_name=job.display_name,
+                product="Button",
+                size_key="button",
+                render_settings={"button_specs": new_specs},
+            )
+            self.start_print_workflow([job], "Button Print")
+
+        def save_button_from_specs():
+            default_name = f"{os.path.splitext(state['image_name'])[0]}_button_4x6.png"
+            save_path = filedialog.asksaveasfilename(
+                title="Save Button 4x6 PNG",
+                defaultextension=".png",
+                initialfile=default_name,
+                filetypes=[("PNG Image", "*.png"), ("All Files", "*.*")],
+            )
+            if not save_path:
+                return
+            try:
+                render_current_sheet_specs().save(save_path, format="PNG")
+                messagebox.showinfo("Saved", f"Button print saved:\n{save_path}")
+            except Exception as exc:
+                messagebox.showerror("Save Error", f"Could not save button print:\n{exc}")
+
+        ttk.Button(button_row2, text="Save 4x6 PNG", command=save_button_from_specs).pack(side=tk.LEFT, padx=4)
+        ttk.Button(button_row2, text="Print", command=print_button_from_specs).pack(side=tk.LEFT, padx=4)
+        ttk.Button(button_row2, text="Close", command=top.destroy).pack(side=tk.RIGHT, padx=4)
+
+        redraw_specs()
+
+    def open_photo_crop_editor(self, item_id: int) -> None:
+        """Open a lightweight crop/position adjustment editor for a queued photo job.
+
+        Supports 4x6, 5x7, 8x10, and 4x5 print sizes.  The default centered
+        crop is shown initially; the user can shift and zoom before saving.
+        Saves updated settings back to the queue item's render_settings.
+        """
+        if not HAS_PIL or Image is None or ImageTk is None:
+            messagebox.showerror("Missing Library", "Please run 'pip install pillow' to edit crop settings.")
+            return
+
+        item = self.print_queue_store.get_item(item_id)
+        if not item:
+            messagebox.showerror("Not Found", f"Queue item {item_id} not found.")
+            return
+
+        if item.source_type not in ("file", "url"):
+            messagebox.showinfo("Not Applicable", "Crop adjustment is only available for file or URL photo jobs.")
+            return
+
+        if item.source_type == "file":
+            img_path = item.source
+            if not os.path.isfile(img_path):
+                img_path = filedialog.askopenfilename(
+                    title="Locate Image File",
+                    filetypes=[("Image Files", "*.jpg *.jpeg *.png *.tif *.tiff *.bmp"), ("All Files", "*.*")],
+                )
+                if not img_path:
+                    return
+            try:
+                source_img = Image.open(img_path).convert("RGB")
+            except Exception as exc:
+                messagebox.showerror("Image Error", f"Could not open image:\n{exc}")
+                return
+        else:
+            messagebox.showinfo(
+                "URL Source",
+                "Crop adjustment for URL sources requires downloading the image first. "
+                "Please save the image locally and update the source path.",
+            )
+            return
+
+        from printing_service import PRINT_ASPECT_RATIOS
+        size_key = item.size_key
+        ratio = PRINT_ASPECT_RATIOS.get(size_key)
+        if not ratio:
+            messagebox.showinfo("Not Applicable", f"Crop adjustment is not available for size '{size_key}'.")
+            return
+
+        top = tk.Toplevel(self.root)
+        top.title(f"Crop/Position Editor — {item.display_name}")
+        top.geometry("680x560")
+        top.transient(self.root)
+
+        saved = item.render_settings
+        crop_scale_val = saved.get("crop_scale", 1.0) or 1.0
+        crop_offset_x_val = saved.get("crop_offset_x", 0.0) or 0.0
+        crop_offset_y_val = saved.get("crop_offset_y", 0.0) or 0.0
+
+        # Preview area
+        preview_max = 400
+        short_r, long_r = ratio
+        img_w, img_h = source_img.size
+        is_portrait = img_w <= img_h
+        if is_portrait:
+            prev_h = preview_max
+            prev_w = round(preview_max * short_r / long_r)
+        else:
+            prev_w = preview_max
+            prev_h = round(preview_max * short_r / long_r)
+
+        canvas = tk.Canvas(top, width=prev_w + 20, height=prev_h + 20, background="#d9d9d9", highlightthickness=0)
+        canvas.pack(pady=(14, 6))
+
+        crop_scale_var = tk.DoubleVar(value=crop_scale_val)
+        offset_x_var = tk.IntVar(value=int(crop_offset_x_val))
+        offset_y_var = tk.IntVar(value=int(crop_offset_y_val))
+
+        def _render_preview():
+            preview_img = self.printing_service._center_crop_to_print_ratio(
+                source_img,
+                size_key,
+                crop_scale=crop_scale_var.get(),
+                crop_offset_x=float(offset_x_var.get()),
+                crop_offset_y=float(offset_y_var.get()),
+            )
+            resized = preview_img.resize((prev_w, prev_h), Image.Resampling.LANCZOS)
+            photo = ImageTk.PhotoImage(resized)
+            canvas.delete("all")
+            canvas.create_image(10, 10, anchor=tk.NW, image=photo)
+            canvas._photo_ref = photo  # keep reference
+
+        controls_frame = ttk.Frame(top, padding=10)
+        controls_frame.pack(fill=tk.X)
+
+        ttk.Label(controls_frame, text="Zoom:").grid(row=0, column=0, sticky="e", padx=4, pady=4)
+        zoom_pct_var = tk.DoubleVar(value=round((crop_scale_val - 1.0) * 100))
+
+        def _apply_zoom(*_):
+            crop_scale_var.set(1.0 + zoom_pct_var.get() / 100.0)
+            _render_preview()
+
+        ttk.Scale(controls_frame, from_=-50, to=100, orient=tk.HORIZONTAL, variable=zoom_pct_var,
+                  command=_apply_zoom).grid(row=0, column=1, sticky="ew", padx=4, pady=4)
+        zoom_display = ttk.Label(controls_frame, text=f"{zoom_pct_var.get():.0f}%", width=6)
+        zoom_display.grid(row=0, column=2, sticky="w")
+        zoom_pct_var.trace_add("write", lambda *_: zoom_display.config(text=f"{zoom_pct_var.get():.0f}%"))
+
+        step_label = "Horizontal" if is_portrait else "Vertical"
+        ttk.Label(controls_frame, text=f"Shift {step_label}:").grid(row=1, column=0, sticky="e", padx=4, pady=4)
+
+        def _step_offset(axis: str, delta: int) -> None:
+            if axis == "x":
+                offset_x_var.set(offset_x_var.get() + delta)
+            else:
+                offset_y_var.set(offset_y_var.get() + delta)
+            _render_preview()
+
+        if is_portrait:
+            # Portrait images crop horizontally → left/right adjustment
+            shift_frame = ttk.Frame(controls_frame)
+            shift_frame.grid(row=1, column=1, sticky="w", padx=4)
+            ttk.Button(shift_frame, text="◀ Left", width=8, command=lambda: _step_offset("x", -20)).pack(side=tk.LEFT, padx=3)
+            ttk.Button(shift_frame, text="Right ▶", width=8, command=lambda: _step_offset("x", 20)).pack(side=tk.LEFT, padx=3)
+            ttk.Label(controls_frame, text="Shift Vertical:").grid(row=2, column=0, sticky="e", padx=4, pady=4)
+            shift_frame2 = ttk.Frame(controls_frame)
+            shift_frame2.grid(row=2, column=1, sticky="w", padx=4)
+            ttk.Button(shift_frame2, text="▲ Up", width=8, command=lambda: _step_offset("y", -20)).pack(side=tk.LEFT, padx=3)
+            ttk.Button(shift_frame2, text="Down ▼", width=8, command=lambda: _step_offset("y", 20)).pack(side=tk.LEFT, padx=3)
+        else:
+            # Landscape images crop vertically → up/down adjustment
+            shift_frame = ttk.Frame(controls_frame)
+            shift_frame.grid(row=1, column=1, sticky="w", padx=4)
+            ttk.Button(shift_frame, text="▲ Up", width=8, command=lambda: _step_offset("y", -20)).pack(side=tk.LEFT, padx=3)
+            ttk.Button(shift_frame, text="Down ▼", width=8, command=lambda: _step_offset("y", 20)).pack(side=tk.LEFT, padx=3)
+            ttk.Label(controls_frame, text="Shift Horizontal:").grid(row=2, column=0, sticky="e", padx=4, pady=4)
+            shift_frame2 = ttk.Frame(controls_frame)
+            shift_frame2.grid(row=2, column=1, sticky="w", padx=4)
+            ttk.Button(shift_frame2, text="◀ Left", width=8, command=lambda: _step_offset("x", -20)).pack(side=tk.LEFT, padx=3)
+            ttk.Button(shift_frame2, text="Right ▶", width=8, command=lambda: _step_offset("x", 20)).pack(side=tk.LEFT, padx=3)
+
+        controls_frame.columnconfigure(1, weight=1)
+
+        def reset_to_default():
+            zoom_pct_var.set(0)
+            crop_scale_var.set(1.0)
+            offset_x_var.set(0)
+            offset_y_var.set(0)
+            _render_preview()
+
+        def save_crop_settings():
+            new_settings = dict(saved)
+            cs = crop_scale_var.get()
+            ox = float(offset_x_var.get())
+            oy = float(offset_y_var.get())
+            if cs != 1.0:
+                new_settings["crop_scale"] = cs
+            else:
+                new_settings.pop("crop_scale", None)
+            if ox != 0.0:
+                new_settings["crop_offset_x"] = ox
+            else:
+                new_settings.pop("crop_offset_x", None)
+            if oy != 0.0:
+                new_settings["crop_offset_y"] = oy
+            else:
+                new_settings.pop("crop_offset_y", None)
+            self.print_queue_store.update_render_settings(item_id, new_settings)
+            messagebox.showinfo("Saved", "Crop settings saved to queue item.", parent=top)
+            top.destroy()
+
+        btn_row = ttk.Frame(top, padding=8)
+        btn_row.pack(fill=tk.X)
+        ttk.Button(btn_row, text="Reset to Default", command=reset_to_default).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btn_row, text="Save", command=save_crop_settings).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btn_row, text="Cancel", command=top.destroy).pack(side=tk.RIGHT, padx=4)
+
+        _render_preview()
+
+    def open_print_queue(self) -> None:
+        """Open the persistent print queue management window."""
+        top = tk.Toplevel(self.root)
+        top.title("Print Queue")
+        top.geometry("1100x600")
+        top.transient(self.root)
+
+        # ------------------------------------------------------------------
+        # Filter bar
+        # ------------------------------------------------------------------
+        filter_frame = ttk.Frame(top, padding=(8, 4))
+        filter_frame.pack(fill=tk.X)
+
+        show_archived_var = tk.BooleanVar(value=False)
+
+        ttk.Label(filter_frame, text="View:").pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Radiobutton(filter_frame, text="Active Queue", variable=show_archived_var, value=False).pack(side=tk.LEFT, padx=3)
+        ttk.Radiobutton(filter_frame, text="Archived", variable=show_archived_var, value=True).pack(side=tk.LEFT, padx=3)
+
+        # ------------------------------------------------------------------
+        # Treeview
+        # ------------------------------------------------------------------
+        columns = ("id", "created", "name", "product", "size", "order", "status", "printed", "printed_at", "reprints", "error")
+        col_headers = {
+            "id": ("ID", 50),
+            "created": ("Created", 140),
+            "name": ("Name", 200),
+            "product": ("Product", 120),
+            "size": ("Size", 60),
+            "order": ("Order", 80),
+            "status": ("Status", 80),
+            "printed": ("Printed", 60),
+            "printed_at": ("Printed At", 140),
+            "reprints": ("Reprints", 60),
+            "error": ("Last Error", 160),
+        }
+
+        tree_frame = ttk.Frame(top)
+        tree_frame.pack(fill=tk.BOTH, expand=True, padx=8, pady=4)
+
+        tree = ttk.Treeview(tree_frame, columns=columns, show="headings", selectmode="extended")
+        for col, (header, width) in col_headers.items():
+            tree.heading(col, text=header)
+            tree.column(col, width=width, minwidth=40)
+
+        vsb = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL, command=tree.yview)
+        hsb = ttk.Scrollbar(tree_frame, orient=tk.HORIZONTAL, command=tree.xview)
+        tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+        tree.grid(row=0, column=0, sticky="nsew")
+        vsb.grid(row=0, column=1, sticky="ns")
+        hsb.grid(row=1, column=0, sticky="ew")
+        tree_frame.rowconfigure(0, weight=1)
+        tree_frame.columnconfigure(0, weight=1)
+
+        # Tag colours for status
+        tree.tag_configure("printed", foreground="#1a7a1a")
+        tree.tag_configure("failed", foreground="#b00000")
+        tree.tag_configure("archived", foreground="#888888")
+
+        # Keep a mapping from tree iid → PrintQueueItem
+        _item_map: dict[str, object] = {}
+
+        def _load_items():
+            tree.delete(*tree.get_children())
+            _item_map.clear()
+            if show_archived_var.get():
+                items = self.print_queue_store.get_archived()
+            else:
+                items = self.print_queue_store.get_active_queue()
+            for qi in items:
+                printed_str = "Yes" if qi.printed else "No"
+                iid = str(qi.id)
+                tree.insert(
+                    "",
+                    tk.END,
+                    iid=iid,
+                    values=(
+                        qi.id,
+                        qi.created_at,
+                        qi.display_name,
+                        qi.product,
+                        qi.size_key,
+                        qi.order_id,
+                        qi.status,
+                        printed_str,
+                        qi.printed_at,
+                        qi.reprint_count,
+                        qi.last_error[:60] if qi.last_error else "",
+                    ),
+                    tags=(qi.status,),
+                )
+                _item_map[iid] = qi
+
+        show_archived_var.trace_add("write", lambda *_: _load_items())
+
+        def _selected_items() -> list:
+            return [_item_map[iid] for iid in tree.selection() if iid in _item_map]
+
+        # ------------------------------------------------------------------
+        # Action helpers
+        # ------------------------------------------------------------------
+        def _action_archive():
+            sel = _selected_items()
+            if not sel:
+                messagebox.showwarning("No Selection", "Select one or more items to archive.", parent=top)
+                return
+            for qi in sel:
+                self.print_queue_store.archive(qi.id)
+            _load_items()
+
+        def _action_requeue():
+            sel = _selected_items()
+            if not sel:
+                messagebox.showwarning("No Selection", "Select one or more items to re-queue.", parent=top)
+                return
+            for qi in sel:
+                self.print_queue_store.requeue(qi.id)
+            _load_items()
+
+        def _action_print_selected():
+            """Print the selected queue items immediately."""
+            sel = _selected_items()
+            if not sel:
+                messagebox.showwarning("No Selection", "Select items to print.", parent=top)
+                return
+            jobs = []
+            for qi in sel:
+                job = self._queue_item_to_print_job(qi)
+                if job:
+                    jobs.append(job)
+            if not jobs:
+                messagebox.showerror("Cannot Print", "None of the selected items could be reconstructed into print jobs.", parent=top)
+                return
+            self.start_print_workflow(jobs, "Queue Print")
+            _load_items()
+
+        def _action_reprint():
+            """Reprint already-printed or failed items."""
+            sel = _selected_items()
+            if not sel:
+                messagebox.showwarning("No Selection", "Select items to reprint.", parent=top)
+                return
+            jobs = []
+            for qi in sel:
+                job = self._queue_item_to_print_job(qi)
+                if job:
+                    self.print_queue_store.increment_reprint_count(qi.id)
+                    jobs.append(job)
+            if not jobs:
+                messagebox.showerror("Cannot Reprint", "None of the selected items could be reconstructed into print jobs.", parent=top)
+                return
+            self.start_print_workflow(jobs, "Reprint")
+            _load_items()
+
+        def _action_edit_crop():
+            """Open the crop/position editor for the selected photo item."""
+            sel = _selected_items()
+            if len(sel) != 1:
+                messagebox.showwarning("Selection", "Select exactly one item to edit crop settings.", parent=top)
+                return
+            qi = sel[0]
+            if qi.source_type not in ("file", "url"):
+                messagebox.showinfo("Not Applicable", "Crop editing is only available for file or URL photo jobs.", parent=top)
+                return
+            top.after(0, lambda: self.open_photo_crop_editor(qi.id))
+
+        def _action_open_button_editor():
+            """Reopen the button designer for the selected button item."""
+            sel = _selected_items()
+            if len(sel) != 1:
+                messagebox.showwarning("Selection", "Select exactly one button item.", parent=top)
+                return
+            qi = sel[0]
+            if qi.source_type != "button":
+                messagebox.showinfo("Not Applicable", "This action is only available for button queue items.", parent=top)
+                return
+            specs = qi.render_settings.get("button_specs", {})
+            if not specs:
+                specs = {"image_path": qi.source}
+            top.after(0, lambda: self.open_button_print_editor_from_specs(specs))
+
+        # ------------------------------------------------------------------
+        # Button bar
+        # ------------------------------------------------------------------
+        btn_frame = ttk.Frame(top, padding=(8, 4))
+        btn_frame.pack(fill=tk.X)
+
+        ttk.Button(btn_frame, text="Print Selected", command=_action_print_selected).pack(side=tk.LEFT, padx=3)
+        ttk.Button(btn_frame, text="Reprint", command=_action_reprint).pack(side=tk.LEFT, padx=3)
+        ttk.Button(btn_frame, text="Archive", command=_action_archive).pack(side=tk.LEFT, padx=3)
+        ttk.Button(btn_frame, text="Re-queue", command=_action_requeue).pack(side=tk.LEFT, padx=3)
+        ttk.Button(btn_frame, text="Edit Crop…", command=_action_edit_crop).pack(side=tk.LEFT, padx=3)
+        ttk.Button(btn_frame, text="Open Button Designer", command=_action_open_button_editor).pack(side=tk.LEFT, padx=3)
+        ttk.Button(btn_frame, text="Refresh", command=_load_items).pack(side=tk.LEFT, padx=3)
+        ttk.Button(btn_frame, text="Close", command=top.destroy).pack(side=tk.RIGHT, padx=3)
+
+        _load_items()
+
+    def _queue_item_to_print_job(self, qi) -> "PrintJob | None":
+        """Reconstruct a PrintJob from a PrintQueueItem for printing/reprinting.
+
+        Returns None if the item cannot be reconstructed (e.g. missing source).
+        """
+        from print_queue_store import PrintQueueItem
+        settings = qi.render_settings or {}
+
+        if qi.source_type == "button":
+            # Render the button sheet from stored specs.
+            specs = settings.get("button_specs", {})
+            image_path = specs.get("image_path", "") or qi.source
+            if not image_path or not os.path.isfile(image_path):
+                logger.warning("Button reprint: image not found at %s", image_path)
+                return None
+            if not HAS_PIL or Image is None:
+                return None
+            try:
+                source_img = Image.open(image_path).convert("RGB")
+            except Exception as exc:
+                logger.warning("Button reprint: could not open image %s: %s", image_path, exc)
+                return None
+            try:
+                cx_off = int(round(float(specs.get("circle_offset_x", 0))))
+                cy_off = int(round(float(specs.get("circle_offset_y", 0))))
+            except (TypeError, ValueError):
+                cx_off = cy_off = 0
+            pil_sheet = self.printing_service.render_button_sheet(
+                source_img,
+                scale=specs.get("scale"),
+                offset=specs.get("offset"),
+                circle_diameter=specs.get("outer_diameter"),
+                finished_diameter=specs.get("finished_diameter"),
+                print_finished_circle=bool(specs.get("print_finished_circle", True)),
+                print_lime_calibration_rectangle=bool(specs.get("print_lime_calibration_rectangle", False)),
+                lime_rectangle_width=specs.get("lime_rectangle_width"),
+                circle_offset=(cx_off, cy_off),
+                edge_border=bool(specs.get("edge_border", False)),
+                print_params=bool(specs.get("print_params", False)),
+                curved_text={
+                    "text": specs.get("text", ""),
+                    "position": specs.get("position", "top"),
+                    "inward": specs.get("facing", "outward") == "inward",
+                    "font_family": specs.get("font", ""),
+                    "font_size": specs.get("font_size", "72"),
+                    "color": specs.get("text_color", "#000000"),
+                    "style": specs.get("text_style", "Regular"),
+                    "char_spacing": specs.get("char_spacing", "0"),
+                    "radius_offset": specs.get("radius_offset", "0"),
+                    "stroke_color": specs.get("stroke_color", "#000000"),
+                    "stroke_width": specs.get("stroke_width", "0"),
+                },
+            )
+            return PrintJob(
+                source_type="pil",
+                source=pil_sheet,
+                display_name=qi.display_name,
+                product=qi.product,
+                size_key=qi.size_key or "button",
+                routed_printer=qi.routed_printer or None,
+                order_id=qi.order_id,
+                queue_item_id=qi.id,
+            )
+
+        if qi.source_type == "address":
+            addr_dict = settings.get("address", {})
+            if not addr_dict:
+                logger.warning("Address reprint: no address stored in settings for item %s", qi.id)
+                return None
+            address = ShippingAddress(**addr_dict)
+            label_options = settings.get("label_options", {})
+            return PrintJob(
+                source_type="address",
+                source=addr_dict,
+                display_name=qi.display_name,
+                product=qi.product,
+                size_key=qi.size_key or "4x6",
+                address=address,
+                label_options=label_options,
+                routed_printer=qi.routed_printer or None,
+                order_id=qi.order_id,
+                queue_item_id=qi.id,
+            )
+
+        if qi.source_type in ("file", "url"):
+            return PrintJob(
+                source_type=qi.source_type,
+                source=qi.source,
+                display_name=qi.display_name,
+                product=qi.product,
+                size_key=qi.size_key,
+                routed_printer=qi.routed_printer or None,
+                order_id=qi.order_id,
+                queue_item_id=qi.id,
+                crop_scale=float(settings.get("crop_scale", 1.0) or 1.0),
+                crop_offset_x=float(settings.get("crop_offset_x", 0.0) or 0.0),
+                crop_offset_y=float(settings.get("crop_offset_y", 0.0) or 0.0),
+            )
+
+        logger.warning("Unknown source_type '%s' for queue item %s", qi.source_type, qi.id)
+        return None
         selected_orders = self.get_selected_orders()
         if len(selected_orders) == 1:
             return selected_orders[0]
@@ -2194,20 +3154,17 @@ class SytistDashboard:
             save_brand_settings()
             self.save_config()
             top.destroy()
-            self.start_print_workflow(
-                [
-                    PrintJob(
-                        source_type="address",
-                        source=asdict(address),
-                        display_name=(address.full_name or "address_label").strip(),
-                        product="4x6 Address Label",
-                        size_key="4x6",
-                        address=address,
-                        label_options=build_label_options(),
-                    )
-                ],
-                "4x6 Address Print",
+            job = PrintJob(
+                source_type="address",
+                source=asdict(address),
+                display_name=(address.full_name or "address_label").strip(),
+                product="4x6 Address Label",
+                size_key="4x6",
+                address=address,
+                label_options=build_label_options(),
             )
+            self._enqueue_jobs([job])
+            self.start_print_workflow([job], "4x6 Address Print")
 
         button_row = ttk.Frame(frame)
         button_row.grid(row=11, column=0, columnspan=4, sticky="e", pady=(16, 0))
@@ -2266,6 +3223,9 @@ class SytistDashboard:
             target_printer = routed_printer if routed_printer else fallback_printer
             if not target_printer:
                 fail_count += 1
+                _qid = getattr(job, "queue_item_id", None)
+                if _qid:
+                    self.print_queue_store.mark_failed(_qid, "No printer resolved")
                 continue
 
             _idx, _name, _size, _printer = index, job.display_name, size_key or "UNKNOWN", target_printer
@@ -2277,9 +3237,15 @@ class SytistDashboard:
             try:
                 self.printing_service.execute_print_job(job, fallback_printer)
                 success_count += 1
+                _qid = getattr(job, "queue_item_id", None)
+                if _qid:
+                    self.print_queue_store.mark_printed(_qid)
             except Exception as e:
                 fail_count += 1
                 logger.warning("Failed to print %s on %s: %s", job.display_name, target_printer, e)
+                _qid = getattr(job, "queue_item_id", None)
+                if _qid:
+                    self.print_queue_store.mark_failed(_qid, str(e))
 
             _s, _f = success_count, fail_count
             self.root.after(0, lambda s=_s, f=_f: result_label.config(text=f"Sent: {s} Failed: {f}"))
