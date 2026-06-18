@@ -38,6 +38,39 @@ class USPSConfigAndStateTests(unittest.TestCase):
         self.assertIn("mailing_label", config)
         self.assertIn("Default", config["mailing_label"]["brands"])
         self.assertEqual(config["mailing_label"]["brands"]["Default"]["logo_scale"], 1.0)
+        self.assertIn("button_autocrop", config)
+        self.assertIn("selected_template", config["button_autocrop"])
+        self.assertIn(config["button_autocrop"]["selected_template"], config["button_autocrop"]["templates"])
+
+    def test_config_store_round_trips_button_autocrop_templates(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "config.json")
+            store = ConfigStore(path)
+            config = store.load()
+            config["button_autocrop"] = {
+                "selected_template": "Close Crop",
+                "templates": {
+                    "Close Crop": {
+                        "name": "Close Crop",
+                        "detector_mode": "mediapipe_face",
+                        "crop_mode": "square",
+                        "top_buffer": 0.25,
+                        "bottom_buffer": 0.35,
+                        "left_buffer": 0.15,
+                        "right_buffer": 0.15,
+                        "scale_multiplier": 1.1,
+                        "anchor_x": 0.5,
+                        "anchor_y": 0.45,
+                    }
+                },
+            }
+            store.save(config)
+            loaded = store.load()
+
+        template = loaded["button_autocrop"]["templates"]["Close Crop"]
+        self.assertEqual(loaded["button_autocrop"]["selected_template"], "Close Crop")
+        self.assertEqual(template["top_buffer"], 0.25)
+        self.assertEqual(template["scale_multiplier"], 1.1)
 
     def test_dashboard_state_defaults_include_usps_shipment(self):
         with tempfile.TemporaryDirectory() as tmpdir:

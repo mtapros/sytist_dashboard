@@ -15,7 +15,13 @@ from tkinter import colorchooser, filedialog, messagebox, simpledialog, ttk
 import tkinter.font as tkfont
 
 from action_log import ActionLogStore
-from button_autocrop import suggest_button_autocrop
+from button_autocrop import (
+    AutoCropTemplate,
+    default_autocrop_template,
+    normalize_autocrop_template_store,
+    suggest_button_autocrop,
+    suggest_button_autocrop_from_template,
+)
 from config_store import ConfigStore
 from dashboard_state import DashboardStateStore
 from data_loader import HAS_MYSQL, SytistDataLoader
@@ -104,6 +110,194 @@ class SytistDashboard:
         self.setup_ui()
         self.refresh_domain_ui()
         self.apply_selected_preset_to_runtime()
+
+    def _get_button_autocrop_store(self) -> dict:
+        store = normalize_autocrop_template_store(self.config.get("button_autocrop"))
+        self.config["button_autocrop"] = store
+        return store
+
+    def _save_button_autocrop_store(self, store: dict, *, selected_template: str | None = None) -> None:
+        normalized = normalize_autocrop_template_store(store)
+        if selected_template and selected_template in normalized.get("templates", {}):
+            normalized["selected_template"] = selected_template
+        self.config["button_autocrop"] = normalized
+        self.config_store.save(self.config)
+
+    def _resolve_button_autocrop_template(
+        self,
+        template_name: str = "",
+        template_data: dict | None = None,
+    ) -> AutoCropTemplate:
+        store = self._get_button_autocrop_store()
+        templates = dict(store.get("templates") or {})
+        candidate_name = str(template_name or "").strip()
+        if candidate_name and candidate_name in templates:
+            return AutoCropTemplate.from_dict(templates[candidate_name])
+        if isinstance(template_data, dict) and template_data:
+            return AutoCropTemplate.from_dict(template_data)
+        selected_name = str(store.get("selected_template", "")).strip()
+        if selected_name in templates:
+            return AutoCropTemplate.from_dict(templates[selected_name])
+        if templates:
+            return AutoCropTemplate.from_dict(next(iter(templates.values())))
+        return default_autocrop_template()
+
+    def _button_autocrop_template_names(self) -> list[str]:
+        return sorted((self._get_button_autocrop_store().get("templates") or {}).keys())
+
+    def _open_button_autocrop_designer(
+        self,
+        *,
+        parent,
+        source_img,
+        current_template: AutoCropTemplate,
+        apply_preview,
+        on_save_template,
+    ) -> None:
+        dialog = tk.Toplevel(parent)
+        dialog.title("Auto-Crop Designer")
+        dialog.geometry("420x520")
+        dialog.transient(parent)
+
+        store = self._get_button_autocrop_store()
+        existing_names = sorted((store.get("templates") or {}).keys())
+
+        selected_var = tk.StringVar(value=current_template.name)
+        name_var = tk.StringVar(value=current_template.name)
+        detector_var = tk.StringVar(value=current_template.detector_mode)
+        crop_mode_var = tk.StringVar(value=current_template.crop_mode)
+        top_buffer_var = tk.StringVar(value=f"{current_template.top_buffer:.2f}")
+        bottom_buffer_var = tk.StringVar(value=f"{current_template.bottom_buffer:.2f}")
+        left_buffer_var = tk.StringVar(value=f"{current_template.left_buffer:.2f}")
+        right_buffer_var = tk.StringVar(value=f"{current_template.right_buffer:.2f}")
+        scale_var = tk.StringVar(value=f"{current_template.scale_multiplier:.2f}")
+        anchor_x_var = tk.StringVar(value=f"{current_template.anchor_x:.2f}")
+        anchor_y_var = tk.StringVar(value=f"{current_template.anchor_y:.2f}")
+        preview_var = tk.StringVar(value="")
+
+        frame = ttk.Frame(dialog, padding=12)
+        frame.pack(fill=tk.BOTH, expand=True)
+
+        ttk.Label(frame, text="Existing template:").grid(row=0, column=0, sticky="w", pady=3)
+        selector = ttk.Combobox(frame, textvariable=selected_var, values=existing_names, state="readonly", width=24)
+        selector.grid(row=0, column=1, sticky="ew", padx=6, pady=3)
+
+        def build_template() -> AutoCropTemplate:
+            return AutoCropTemplate.from_dict(
+                {
+                    "name": name_var.get(),
+                    "detector_mode": detector_var.get(),
+                    "crop_mode": crop_mode_var.get(),
+                    "top_buffer": top_buffer_var.get(),
+                    "bottom_buffer": bottom_buffer_var.get(),
+                    "left_buffer": left_buffer_var.get(),
+                    "right_buffer": right_buffer_var.get(),
+                    "scale_multiplier": scale_var.get(),
+                    "anchor_x": anchor_x_var.get(),
+                    "anchor_y": anchor_y_var.get(),
+                }
+            )
+
+        def refresh_preview(*_args):
+            template = build_template()
+            suggestion = suggest_button_autocrop_from_template(source_img, BUTTON_CROP_SIZE, template)
+            preview_var.set(
+                f"Method: {suggestion.method}\n"
+                f"Scale: {suggestion.scale:.3f}\n"
+                f"Offset: {tuple(suggestion.offset)}"
+            )
+
+        def load_selected_template():
+            selected_template = self._resolve_button_autocrop_template(selected_var.get())
+            name_var.set(selected_template.name)
+            detector_var.set(selected_template.detector_mode)
+            crop_mode_var.set(selected_template.crop_mode)
+            top_buffer_var.set(f"{selected_template.top_buffer:.2f}")
+            bottom_buffer_var.set(f"{selected_template.bottom_buffer:.2f}")
+            left_buffer_var.set(f"{selected_template.left_buffer:.2f}")
+            right_buffer_var.set(f"{selected_template.right_buffer:.2f}")
+            scale_var.set(f"{selected_template.scale_multiplier:.2f}")
+            anchor_x_var.set(f"{selected_template.anchor_x:.2f}")
+            anchor_y_var.set(f"{selected_template.anchor_y:.2f}")
+            refresh_preview()
+
+        def new_template():
+            template = default_autocrop_template()
+            name_var.set("New Template")
+            detector_var.set(template.detector_mode)
+            crop_mode_var.set(template.crop_mode)
+            top_buffer_var.set(f"{template.top_buffer:.2f}")
+            bottom_buffer_var.set(f"{template.bottom_buffer:.2f}")
+            left_buffer_var.set(f"{template.left_buffer:.2f}")
+            right_buffer_var.set(f"{template.right_buffer:.2f}")
+            scale_var.set(f"{template.scale_multiplier:.2f}")
+            anchor_x_var.set(f"{template.anchor_x:.2f}")
+            anchor_y_var.set(f"{template.anchor_y:.2f}")
+            refresh_preview()
+
+        def preview_template():
+            apply_preview(build_template())
+            refresh_preview()
+
+        def save_template():
+            template = build_template()
+            on_save_template(template)
+            names = self._button_autocrop_template_names()
+            selector.configure(values=names)
+            selected_var.set(template.name)
+            name_var.set(template.name)
+            refresh_preview()
+            messagebox.showinfo("Saved", f"Auto-crop template saved:\n{template.name}", parent=dialog)
+
+        ttk.Button(frame, text="Load Selected", command=load_selected_template).grid(row=0, column=2, sticky="w", pady=3)
+        ttk.Button(frame, text="New", command=new_template).grid(row=1, column=2, sticky="w", pady=3)
+
+        ttk.Label(frame, text="Template name:").grid(row=1, column=0, sticky="w", pady=3)
+        ttk.Entry(frame, textvariable=name_var, width=24).grid(row=1, column=1, sticky="ew", padx=6, pady=3)
+        ttk.Label(frame, text="Detector:").grid(row=2, column=0, sticky="w", pady=3)
+        ttk.Combobox(frame, textvariable=detector_var, values=["mediapipe_face", "centered"], state="readonly", width=16).grid(row=2, column=1, sticky="w", padx=6, pady=3)
+        ttk.Label(frame, text="Crop mode:").grid(row=3, column=0, sticky="w", pady=3)
+        ttk.Combobox(frame, textvariable=crop_mode_var, values=["square"], state="readonly", width=16).grid(row=3, column=1, sticky="w", padx=6, pady=3)
+
+        fields = [
+            ("Top buffer", top_buffer_var),
+            ("Bottom buffer", bottom_buffer_var),
+            ("Left buffer", left_buffer_var),
+            ("Right buffer", right_buffer_var),
+            ("Scale multiplier", scale_var),
+            ("Anchor X", anchor_x_var),
+            ("Anchor Y", anchor_y_var),
+        ]
+        for row_idx, (label_text, variable) in enumerate(fields, start=4):
+            ttk.Label(frame, text=f"{label_text}:").grid(row=row_idx, column=0, sticky="w", pady=3)
+            ttk.Spinbox(frame, from_=0.0, to=5.0, increment=0.05, textvariable=variable, width=10).grid(row=row_idx, column=1, sticky="w", padx=6, pady=3)
+
+        preview_frame = ttk.LabelFrame(frame, text="Preview", padding=8)
+        preview_frame.grid(row=11, column=0, columnspan=3, sticky="nsew", pady=(10, 6))
+        ttk.Label(preview_frame, textvariable=preview_var, justify=tk.LEFT).pack(anchor="w")
+
+        button_row = ttk.Frame(frame)
+        button_row.grid(row=12, column=0, columnspan=3, sticky="ew", pady=(10, 0))
+        ttk.Button(button_row, text="Preview in Designer", command=preview_template).pack(side=tk.LEFT, padx=4)
+        ttk.Button(button_row, text="Save / Update Template", command=save_template).pack(side=tk.LEFT, padx=4)
+        ttk.Button(button_row, text="Close", command=dialog.destroy).pack(side=tk.RIGHT, padx=4)
+
+        frame.columnconfigure(1, weight=1)
+        frame.rowconfigure(11, weight=1)
+        for variable in [
+            name_var,
+            detector_var,
+            crop_mode_var,
+            top_buffer_var,
+            bottom_buffer_var,
+            left_buffer_var,
+            right_buffer_var,
+            scale_var,
+            anchor_x_var,
+            anchor_y_var,
+        ]:
+            variable.trace_add("write", refresh_preview)
+        refresh_preview()
 
     # ------------------------------------------------------------------
     # Keyring helpers — passwords are stored in the OS credential store
@@ -1602,6 +1796,9 @@ class SytistDashboard:
         top.geometry("980x820")
         top.transient(self.root)
 
+        selected_autocrop_template = self._resolve_button_autocrop_template(
+            self._get_button_autocrop_store().get("selected_template", "")
+        )
         state = {
             "source": source_img,
             "image_name": os.path.basename(filepath),
@@ -1609,10 +1806,11 @@ class SytistDashboard:
             "photo": None,
             "offset": [0, 0],
             "image_path": filepath,
+            "auto_crop_template": selected_autocrop_template.to_dict(),
         }
         crop_w, crop_h = BUTTON_CROP_SIZE
         sheet_w, sheet_h = BUTTON_PRINT_SIZE
-        auto_suggestion = suggest_button_autocrop(source_img, BUTTON_CROP_SIZE)
+        auto_suggestion = suggest_button_autocrop_from_template(source_img, BUTTON_CROP_SIZE, selected_autocrop_template)
         initial_scale = max(crop_w / source_img.width, crop_h / source_img.height)
         state["scale"] = auto_suggestion.scale
         state["offset"] = list(auto_suggestion.offset)
@@ -1644,6 +1842,7 @@ class SytistDashboard:
         zoom_label.pack(anchor="w")
 
         ttk.Scale(controls, from_=50, to=250, orient=tk.HORIZONTAL, variable=zoom_var).pack(fill=tk.X, pady=(0, 10))
+        auto_crop_template_var = tk.StringVar(value=selected_autocrop_template.name)
 
         outer_diameter_var = tk.StringVar(value=str(BUTTON_DEFAULT_DIAMETER))
         finished_diameter_var = tk.StringVar(value=str(BUTTON_DEFAULT_FINISHED_DIAMETER))
@@ -1669,6 +1868,70 @@ class SytistDashboard:
         except Exception:
             font_values = []
         font_var = tk.StringVar(value=("Arial" if "Arial" in font_values else "DejaVuSans.ttf"))
+
+        autocrop_frame = ttk.LabelFrame(controls, text="Auto-crop", padding=8)
+        autocrop_frame.pack(fill=tk.X, pady=(0, 6))
+        ttk.Label(autocrop_frame, text="Template:").grid(row=0, column=0, sticky="w", pady=3)
+        autocrop_template_combo = ttk.Combobox(
+            autocrop_frame,
+            textvariable=auto_crop_template_var,
+            values=self._button_autocrop_template_names(),
+            state="readonly",
+            width=24,
+        )
+        autocrop_template_combo.grid(row=0, column=1, sticky="ew", padx=6, pady=3)
+
+        def refresh_autocrop_template_choices(selected_name: str | None = None):
+            names = self._button_autocrop_template_names()
+            autocrop_template_combo.configure(values=names)
+            if selected_name and selected_name in names:
+                auto_crop_template_var.set(selected_name)
+
+        def get_selected_autocrop_template() -> AutoCropTemplate:
+            template = self._resolve_button_autocrop_template(
+                auto_crop_template_var.get(),
+                state.get("auto_crop_template"),
+            )
+            state["auto_crop_template"] = template.to_dict()
+            return template
+
+        def apply_autocrop_template(template: AutoCropTemplate):
+            suggestion = suggest_button_autocrop_from_template(source_img, BUTTON_CROP_SIZE, template)
+            state["scale"] = suggestion.scale
+            state["offset"] = list(suggestion.offset)
+            state["auto_crop_template"] = template.to_dict()
+            if template.name in self._button_autocrop_template_names():
+                auto_crop_template_var.set(template.name)
+                self._save_button_autocrop_store(self._get_button_autocrop_store(), selected_template=template.name)
+            zoom_var.set((state["scale"] / initial_scale) * 100 if initial_scale > 0 else 100)
+            redraw()
+
+        def save_autocrop_template(template: AutoCropTemplate):
+            store = self._get_button_autocrop_store()
+            templates = dict(store.get("templates") or {})
+            templates[template.name] = template.to_dict()
+            store["templates"] = templates
+            self._save_button_autocrop_store(store, selected_template=template.name)
+            state["auto_crop_template"] = template.to_dict()
+            refresh_autocrop_template_choices(template.name)
+
+        def open_autocrop_designer():
+            self._open_button_autocrop_designer(
+                parent=top,
+                source_img=source_img,
+                current_template=get_selected_autocrop_template(),
+                apply_preview=apply_autocrop_template,
+                on_save_template=save_autocrop_template,
+            )
+
+        def on_autocrop_template_selected(*_args):
+            template = get_selected_autocrop_template()
+            if template.name in self._button_autocrop_template_names():
+                self._save_button_autocrop_store(self._get_button_autocrop_store(), selected_template=template.name)
+
+        auto_crop_template_var.trace_add("write", on_autocrop_template_selected)
+        ttk.Button(autocrop_frame, text="Designer...", command=open_autocrop_designer).grid(row=0, column=2, sticky="w", pady=3)
+        autocrop_frame.columnconfigure(1, weight=1)
 
         def choose_text_color():
             _, color = colorchooser.askcolor(color=text_color_var.get() or "#000000", parent=top)
@@ -1849,11 +2112,7 @@ class SytistDashboard:
             redraw()
 
         def auto_crop():
-            suggestion = suggest_button_autocrop(source_img, BUTTON_CROP_SIZE)
-            state["scale"] = suggestion.scale
-            state["offset"] = list(suggestion.offset)
-            zoom_var.set((state["scale"] / initial_scale) * 100 if initial_scale > 0 else 100)
-            redraw()
+            apply_autocrop_template(get_selected_autocrop_template())
 
         zoom_var.trace_add("write", lambda *_: set_zoom(zoom_var.get()))
         for var in [
@@ -2015,6 +2274,8 @@ class SytistDashboard:
                 "radius_offset": radius_offset_var.get(),
                 "stroke_color": stroke_color_var.get(),
                 "stroke_width": stroke_width_var.get(),
+                "auto_crop_template_name": auto_crop_template_var.get(),
+                "auto_crop_template": dict(state.get("auto_crop_template") or {}),
             }
 
         def add_button_to_queue():
@@ -2050,6 +2311,7 @@ class SytistDashboard:
         ttk.Button(button_row, text="Print", command=print_button_sheet).pack(side=tk.LEFT, padx=4)
         ttk.Button(button_row, text="Add to Queue", command=add_button_to_queue).pack(side=tk.LEFT, padx=4)
         ttk.Button(button_row, text="Auto-Crop", command=auto_crop).pack(side=tk.LEFT, padx=4)
+        ttk.Button(button_row, text="Auto-Crop Designer...", command=open_autocrop_designer).pack(side=tk.LEFT, padx=4)
         ttk.Button(button_row, text="Save Template", command=save_template).pack(side=tk.LEFT, padx=4)
         ttk.Button(button_row, text="Load Template", command=load_template).pack(side=tk.LEFT, padx=4)
         ttk.Button(button_row, text="Close", command=top.destroy).pack(side=tk.RIGHT, padx=4)
@@ -2095,7 +2357,11 @@ class SytistDashboard:
         sheet_w, sheet_h = BUTTON_PRINT_SIZE
         initial_scale = max(crop_w / source_img.width, crop_h / source_img.height)
 
-        auto_suggestion = suggest_button_autocrop(source_img, BUTTON_CROP_SIZE)
+        selected_autocrop_template = self._resolve_button_autocrop_template(
+            specs.get("auto_crop_template_name", ""),
+            specs.get("auto_crop_template"),
+        )
+        auto_suggestion = suggest_button_autocrop_from_template(source_img, BUTTON_CROP_SIZE, selected_autocrop_template)
         saved_scale = specs.get("scale", auto_suggestion.scale)
         saved_offset = specs.get("offset", auto_suggestion.offset)
 
@@ -2107,6 +2373,7 @@ class SytistDashboard:
             "offset": list(saved_offset),
             "scale": saved_scale,
             "image_path": image_path,
+            "auto_crop_template": selected_autocrop_template.to_dict(),
         }
 
         ttk.Label(
@@ -2136,6 +2403,7 @@ class SytistDashboard:
         zoom_label = ttk.Label(controls, text=f"Zoom: {zoom_pct:.0f}%")
         zoom_label.pack(anchor="w")
         ttk.Scale(controls, from_=50, to=250, orient=tk.HORIZONTAL, variable=zoom_var).pack(fill=tk.X, pady=(0, 10))
+        auto_crop_template_var = tk.StringVar(value=selected_autocrop_template.name)
 
         outer_diameter_var = tk.StringVar(value=str(specs.get("outer_diameter", BUTTON_DEFAULT_DIAMETER)))
         finished_diameter_var = tk.StringVar(value=str(specs.get("finished_diameter", BUTTON_DEFAULT_FINISHED_DIAMETER)))
@@ -2161,6 +2429,70 @@ class SytistDashboard:
         except Exception:
             font_values = []
         font_var = tk.StringVar(value=str(specs.get("font", "Arial" if "Arial" in font_values else "DejaVuSans.ttf")))
+
+        autocrop_frame = ttk.LabelFrame(controls, text="Auto-crop", padding=8)
+        autocrop_frame.pack(fill=tk.X, pady=(0, 6))
+        ttk.Label(autocrop_frame, text="Template:").grid(row=0, column=0, sticky="w", pady=3)
+        autocrop_template_combo = ttk.Combobox(
+            autocrop_frame,
+            textvariable=auto_crop_template_var,
+            values=self._button_autocrop_template_names(),
+            state="readonly",
+            width=24,
+        )
+        autocrop_template_combo.grid(row=0, column=1, sticky="ew", padx=6, pady=3)
+
+        def refresh_autocrop_template_choices(selected_name: str | None = None):
+            names = self._button_autocrop_template_names()
+            autocrop_template_combo.configure(values=names)
+            if selected_name and selected_name in names:
+                auto_crop_template_var.set(selected_name)
+
+        def get_selected_autocrop_template() -> AutoCropTemplate:
+            template = self._resolve_button_autocrop_template(
+                auto_crop_template_var.get(),
+                state.get("auto_crop_template"),
+            )
+            state["auto_crop_template"] = template.to_dict()
+            return template
+
+        def apply_autocrop_template(template: AutoCropTemplate):
+            suggestion = suggest_button_autocrop_from_template(source_img, BUTTON_CROP_SIZE, template)
+            state["scale"] = suggestion.scale
+            state["offset"] = list(suggestion.offset)
+            state["auto_crop_template"] = template.to_dict()
+            if template.name in self._button_autocrop_template_names():
+                auto_crop_template_var.set(template.name)
+                self._save_button_autocrop_store(self._get_button_autocrop_store(), selected_template=template.name)
+            zoom_var.set((state["scale"] / initial_scale) * 100 if initial_scale > 0 else 100)
+            redraw_specs()
+
+        def save_autocrop_template(template: AutoCropTemplate):
+            store = self._get_button_autocrop_store()
+            templates = dict(store.get("templates") or {})
+            templates[template.name] = template.to_dict()
+            store["templates"] = templates
+            self._save_button_autocrop_store(store, selected_template=template.name)
+            state["auto_crop_template"] = template.to_dict()
+            refresh_autocrop_template_choices(template.name)
+
+        def open_autocrop_designer():
+            self._open_button_autocrop_designer(
+                parent=top,
+                source_img=source_img,
+                current_template=get_selected_autocrop_template(),
+                apply_preview=apply_autocrop_template,
+                on_save_template=save_autocrop_template,
+            )
+
+        def on_autocrop_template_selected(*_args):
+            template = get_selected_autocrop_template()
+            if template.name in self._button_autocrop_template_names():
+                self._save_button_autocrop_store(self._get_button_autocrop_store(), selected_template=template.name)
+
+        auto_crop_template_var.trace_add("write", on_autocrop_template_selected)
+        ttk.Button(autocrop_frame, text="Designer...", command=open_autocrop_designer).grid(row=0, column=2, sticky="w", pady=3)
+        autocrop_frame.columnconfigure(1, weight=1)
 
         def choose_text_color():
             _, color = colorchooser.askcolor(color=text_color_var.get() or "#000000", parent=top)
@@ -2341,11 +2673,7 @@ class SytistDashboard:
             redraw_specs()
 
         def auto_crop_specs():
-            suggestion = suggest_button_autocrop(source_img, BUTTON_CROP_SIZE)
-            state["scale"] = suggestion.scale
-            state["offset"] = list(suggestion.offset)
-            zoom_var.set((state["scale"] / initial_scale) * 100 if initial_scale > 0 else 100)
-            redraw_specs()
+            apply_autocrop_template(get_selected_autocrop_template())
 
         zoom_var.trace_add("write", lambda *_: set_zoom_specs(zoom_var.get()))
         for var in [
@@ -2402,6 +2730,8 @@ class SytistDashboard:
                 "radius_offset": radius_offset_var.get(),
                 "stroke_color": stroke_color_var.get(),
                 "stroke_width": stroke_width_var.get(),
+                "auto_crop_template_name": auto_crop_template_var.get(),
+                "auto_crop_template": dict(state.get("auto_crop_template") or {}),
             }
 
         def print_button_from_specs():
@@ -2453,6 +2783,7 @@ class SytistDashboard:
         ttk.Button(button_row2, text="Save 4x6 PNG", command=save_button_from_specs).pack(side=tk.LEFT, padx=4)
         ttk.Button(button_row2, text="Print", command=print_button_from_specs).pack(side=tk.LEFT, padx=4)
         ttk.Button(button_row2, text="Auto-Crop", command=auto_crop_specs).pack(side=tk.LEFT, padx=4)
+        ttk.Button(button_row2, text="Auto-Crop Designer...", command=open_autocrop_designer).pack(side=tk.LEFT, padx=4)
         ttk.Button(button_row2, text="Close", command=top.destroy).pack(side=tk.RIGHT, padx=4)
 
         redraw_specs()

@@ -2,6 +2,8 @@ import json
 import os
 from copy import deepcopy
 
+from button_autocrop import default_autocrop_template_store, normalize_autocrop_template_store
+
 DEFAULT_DOMAIN = ""
 DEFAULT_PRESET_NAME = "Default"
 
@@ -59,6 +61,7 @@ DEFAULT_CONFIG = {
             }
         },
     },
+    "button_autocrop": default_autocrop_template_store(),
 }
 
 
@@ -105,6 +108,7 @@ class ConfigStore:
         config.setdefault("printer_routes", {})
         config.setdefault("usps", {})
         config.setdefault("mailing_label", {})
+        config.setdefault("button_autocrop", {})
 
         for key in ["4x6", "4x5", "5x7", "8x10", "wallet", "button", "magnet", "7in", "10in"]:
             config["printer_routes"].setdefault(key, "")
@@ -207,6 +211,7 @@ class ConfigStore:
         selected_preset = config["db_presets"][selected]
         selected_preset["domain"] = str(selected_preset.get("domain") or current_domain).strip() or current_domain
         config["domain"] = selected_preset["domain"]
+        config["button_autocrop"] = normalize_autocrop_template_store(config.get("button_autocrop"))
 
 
     def _normalize_preset(self, preset):
