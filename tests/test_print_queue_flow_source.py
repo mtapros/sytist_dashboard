@@ -89,8 +89,11 @@ class PrintQueueFlowSourceTests(unittest.TestCase):
 
     def test_button_editor_uses_autocrop_suggestion(self):
         source = _read_sytist()
-        self.assertIn("suggest_button_autocrop", source)
+        self.assertIn("suggest_button_autocrop_from_template", source)
+        self.assertIn("_open_button_autocrop_designer", source)
+        self.assertIn("auto_crop_template_name", source)
         self.assertIn('text="Auto-Crop"', source)
+        self.assertIn('text="Auto-Crop Designer..."', source)
 
 
 if __name__ == "__main__":
