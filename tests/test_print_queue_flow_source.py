@@ -58,6 +58,8 @@ class PrintQueueFlowSourceTests(unittest.TestCase):
         self.assertIn("open_queue_item_editor", method_src)
         self.assertIn("open_queue_crop_editor", method_src)
         self.assertIn("_open_button_editor_for_queue_item", method_src)
+        self.assertIn("STATUS_DESIGNED", method_src)
+        self.assertIn("STATUS_REQUEUED", method_src)
 
     def test_crop_editor_uses_prepared_images_instead_of_url_blocker(self):
         method_src = _get_method_src("open_photo_crop_editor")
@@ -70,6 +72,25 @@ class PrintQueueFlowSourceTests(unittest.TestCase):
         self.assertIsNotNone(method_src)
         self.assertIn('qi.source_type == "button" or qi.size_key == "button"', method_src)
         self.assertIn("render_button_sheet", method_src)
+
+    def test_queue_button_editor_checks_prior_designs(self):
+        method_src = _get_method_src("_open_button_editor_for_queue_item")
+        self.assertIsNotNone(method_src)
+        self.assertIn("find_prior_button_designs", method_src)
+        self.assertIn("askyesnocancel", method_src)
+        self.assertIn("queue_item_id=item.id", method_src)
+
+    def test_button_editor_from_specs_updates_existing_queue_item(self):
+        method_src = _get_method_src("open_button_print_editor_from_specs")
+        self.assertIsNotNone(method_src)
+        self.assertIn("queue_item_id: int | None = None", method_src)
+        self.assertIn("update_render_settings(queue_item_id, new_settings)", method_src)
+        self.assertIn("mark_designed(queue_item_id)", method_src)
+
+    def test_button_editor_uses_autocrop_suggestion(self):
+        source = _read_sytist()
+        self.assertIn("suggest_button_autocrop", source)
+        self.assertIn('text="Auto-Crop"', source)
 
 
 if __name__ == "__main__":

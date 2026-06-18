@@ -10,9 +10,11 @@ import unittest
 
 from print_queue_store import (
     STATUS_ARCHIVED,
+    STATUS_DESIGNED,
     STATUS_FAILED,
     STATUS_PRINTED,
     STATUS_QUEUED,
+    STATUS_REQUEUED,
     PrintQueueItem,
     PrintQueueStore,
 )
@@ -139,7 +141,17 @@ class PrintQueueStoreStatusTests(unittest.TestCase):
         self.store.mark_printed(self.item_id)
         self.store.requeue(self.item_id)
         item = self.store.get_item(self.item_id)
-        self.assertEqual(item.status, STATUS_QUEUED)
+        self.assertEqual(item.status, STATUS_REQUEUED)
+        self.assertFalse(item.printed)
+        self.assertEqual(item.printed_at, "")
+
+    def test_mark_designed(self):
+        self.store.mark_printed(self.item_id)
+        self.store.mark_designed(self.item_id)
+        item = self.store.get_item(self.item_id)
+        self.assertEqual(item.status, STATUS_DESIGNED)
+        self.assertFalse(item.printed)
+        self.assertEqual(item.printed_at, "")
 
     def test_increment_reprint_count(self):
         self.store.increment_reprint_count(self.item_id)
@@ -180,6 +192,15 @@ class PrintQueueStoreQueryTests(unittest.TestCase):
         self.assertIn(self.id_queued, ids)
         self.assertNotIn(self.id_printed, ids)
         self.assertNotIn(self.id_archived, ids)
+
+    def test_get_queued_only_includes_designed_and_requeued(self):
+        designed_id = self.store.enqueue(source_type="file", display_name="d.jpg")
+        requeued_id = self.store.enqueue(source_type="file", display_name="r.jpg")
+        self.store.mark_designed(designed_id)
+        self.store.requeue(requeued_id)
+        ids = [i.id for i in self.store.get_queued_only()]
+        self.assertIn(designed_id, ids)
+        self.assertIn(requeued_id, ids)
 
     def test_get_archived(self):
         items = self.store.get_archived()
@@ -241,6 +262,56 @@ class PrintQueueItemHelperTests(unittest.TestCase):
         parsed = json.loads(item.render_settings_json())
         self.assertEqual(parsed["a"], 1)
         self.assertEqual(parsed["b"], "hello")
+
+
+class PrintQueueStoreButtonReuseTests(unittest.TestCase):
+    def setUp(self):
+        self.store, self.path = _make_store()
+
+    def tearDown(self):
+        os.unlink(self.path)
+
+    def test_find_prior_button_designs_returns_most_recent_first(self):
+        first = self.store.enqueue(
+            source_type="button",
+            source="/tmp/same.jpg",
+            display_name="Button 1",
+            product="Button",
+            size_key="button",
+            render_settings={"button_specs": {"scale": 1.1}},
+        )
+        self.store.enqueue(
+            source_type="button",
+            source="/tmp/same.jpg",
+            display_name="Button no specs",
+            product="Button",
+            size_key="button",
+            render_settings={},
+        )
+        second = self.store.enqueue(
+            source_type="button",
+            source="/tmp/same.jpg",
+            display_name="Button 2",
+            product="Button",
+            size_key="button",
+            render_settings={"button_specs": {"scale": 2.2}},
+        )
+        current = self.store.enqueue(
+            source_type="button",
+            source="/tmp/same.jpg",
+            display_name="Button current",
+            product="Button",
+            size_key="button",
+            render_settings={},
+        )
+
+        matches = self.store.find_prior_button_designs(
+            item_id=current,
+            product="Button",
+            source="/tmp/same.jpg",
+            size_key="button",
+        )
+        self.assertEqual([m.id for m in matches], [second, first])
 
 
 if __name__ == "__main__":
