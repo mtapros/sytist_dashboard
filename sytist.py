@@ -19,7 +19,6 @@ from button_autocrop import (
     AutoCropTemplate,
     default_autocrop_template,
     normalize_autocrop_template_store,
-    suggest_button_autocrop,
     suggest_button_autocrop_from_template,
 )
 from config_store import ConfigStore
@@ -48,9 +47,10 @@ from usps_service import USPSNotConfiguredError, USPSService, USPSServiceError
 from zoho_books import ZohoBooksClient, ZohoBooksError
 
 try:
-    from PIL import Image, ImageTk
+    from PIL import Image, ImageDraw, ImageTk
 except ImportError:
     Image = None
+    ImageDraw = None
     ImageTk = None
 
 try:
@@ -156,7 +156,7 @@ class SytistDashboard:
     ) -> None:
         dialog = tk.Toplevel(parent)
         dialog.title("Auto-Crop Designer")
-        dialog.geometry("420x520")
+        dialog.geometry("760x760")
         dialog.transient(parent)
 
         store = self._get_button_autocrop_store()
@@ -174,6 +174,7 @@ class SytistDashboard:
         anchor_x_var = tk.StringVar(value=f"{current_template.anchor_x:.2f}")
         anchor_y_var = tk.StringVar(value=f"{current_template.anchor_y:.2f}")
         preview_var = tk.StringVar(value="")
+        visual_preview_state = {"photo": None}
 
         frame = ttk.Frame(dialog, padding=12)
         frame.pack(fill=tk.BOTH, expand=True)
@@ -198,14 +199,59 @@ class SytistDashboard:
                 }
             )
 
-        def refresh_preview(*_args):
+        def _draw_face_overlay(preview_img, suggestion):
+            if ImageDraw is None or not suggestion.face_bounds:
+                return
+            face_x, face_y, face_w, face_h = suggestion.face_bounds
+            crop_w, crop_h = BUTTON_CROP_SIZE
+            sheet_w, sheet_h = BUTTON_PRINT_SIZE
+            preview_w, preview_h = preview_img.size
+            sheet_crop_x = (sheet_w - crop_w) // 2
+            sheet_crop_y = (sheet_h - crop_h) // 2
+            sx = preview_w / sheet_w
+            sy = preview_h / sheet_h
+            left = (sheet_crop_x + suggestion.offset[0] + face_x * suggestion.scale) * sx
+            top = (sheet_crop_y + suggestion.offset[1] + face_y * suggestion.scale) * sy
+            right = (sheet_crop_x + suggestion.offset[0] + (face_x + face_w) * suggestion.scale) * sx
+            bottom = (sheet_crop_y + suggestion.offset[1] + (face_y + face_h) * suggestion.scale) * sy
+            draw = ImageDraw.Draw(preview_img)
+            draw.rectangle((left, top, right, bottom), outline="#00ffff", width=2)
+            cx = (left + right) / 2
+            cy = (top + bottom) / 2
+            draw.line((cx - 6, cy, cx + 6, cy), fill="#00ffff", width=2)
+            draw.line((cx, cy - 6, cx, cy + 6), fill="#00ffff", width=2)
+
+        def render_visual_preview(suggestion):
+            sheet = self.printing_service.render_button_sheet(
+                source_img,
+                scale=suggestion.scale,
+                offset=suggestion.offset,
+                finished_diameter=BUTTON_DEFAULT_FINISHED_DIAMETER,
+                print_finished_circle=True,
+            )
+            preview_img = sheet.resize((240, 360), Image.Resampling.LANCZOS)
+            _draw_face_overlay(preview_img, suggestion)
+            photo = ImageTk.PhotoImage(preview_img)
+            visual_preview_state["photo"] = photo
+            visual_canvas.delete("all")
+            visual_canvas.create_image(0, 0, anchor=tk.NW, image=photo)
+            visual_canvas.create_rectangle(0, 0, 239, 359, outline="#888")
+
+        def refresh_preview(*_args, apply_to_editor: bool = False):
             template = build_template()
             suggestion = suggest_button_autocrop_from_template(source_img, BUTTON_CROP_SIZE, template)
+            if apply_to_editor:
+                apply_preview(template)
             preview_var.set(
                 f"Method: {suggestion.method}\n"
+                f"Status: {suggestion.status_message}\n"
                 f"Scale: {suggestion.scale:.3f}\n"
                 f"Offset: {tuple(suggestion.offset)}"
             )
+            render_visual_preview(suggestion)
+
+        def live_preview(*_args):
+            refresh_preview(apply_to_editor=True)
 
         def load_selected_template():
             selected_template = self._resolve_button_autocrop_template(selected_var.get())
@@ -219,7 +265,7 @@ class SytistDashboard:
             scale_var.set(f"{selected_template.scale_multiplier:.2f}")
             anchor_x_var.set(f"{selected_template.anchor_x:.2f}")
             anchor_y_var.set(f"{selected_template.anchor_y:.2f}")
-            refresh_preview()
+            live_preview()
 
         def new_template():
             template = default_autocrop_template()
@@ -233,11 +279,10 @@ class SytistDashboard:
             scale_var.set(f"{template.scale_multiplier:.2f}")
             anchor_x_var.set(f"{template.anchor_x:.2f}")
             anchor_y_var.set(f"{template.anchor_y:.2f}")
-            refresh_preview()
+            live_preview()
 
         def preview_template():
-            apply_preview(build_template())
-            refresh_preview()
+            live_preview()
 
         def save_template():
             template = build_template()
@@ -246,7 +291,7 @@ class SytistDashboard:
             selector.configure(values=names)
             selected_var.set(template.name)
             name_var.set(template.name)
-            refresh_preview()
+            live_preview()
             messagebox.showinfo("Saved", f"Auto-crop template saved:\n{template.name}", parent=dialog)
 
         ttk.Button(frame, text="Load Selected", command=load_selected_template).grid(row=0, column=2, sticky="w", pady=3)
@@ -260,21 +305,23 @@ class SytistDashboard:
         ttk.Combobox(frame, textvariable=crop_mode_var, values=["square"], state="readonly", width=16).grid(row=3, column=1, sticky="w", padx=6, pady=3)
 
         fields = [
-            ("Top buffer", top_buffer_var),
-            ("Bottom buffer", bottom_buffer_var),
-            ("Left buffer", left_buffer_var),
-            ("Right buffer", right_buffer_var),
-            ("Scale multiplier", scale_var),
-            ("Anchor X", anchor_x_var),
-            ("Anchor Y", anchor_y_var),
+            ("Face top margin", top_buffer_var, 0.0, 5.0),
+            ("Face bottom margin", bottom_buffer_var, 0.0, 5.0),
+            ("Face left margin", left_buffer_var, 0.0, 5.0),
+            ("Face right margin", right_buffer_var, 0.0, 5.0),
+            ("Face size / zoom", scale_var, 0.25, 5.0),
+            ("Face horizontal position", anchor_x_var, 0.0, 1.0),
+            ("Face vertical position", anchor_y_var, 0.0, 1.0),
         ]
-        for row_idx, (label_text, variable) in enumerate(fields, start=4):
+        for row_idx, (label_text, variable, min_value, max_value) in enumerate(fields, start=4):
             ttk.Label(frame, text=f"{label_text}:").grid(row=row_idx, column=0, sticky="w", pady=3)
-            ttk.Spinbox(frame, from_=0.0, to=5.0, increment=0.05, textvariable=variable, width=10).grid(row=row_idx, column=1, sticky="w", padx=6, pady=3)
+            ttk.Spinbox(frame, from_=min_value, to=max_value, increment=0.05, textvariable=variable, width=10).grid(row=row_idx, column=1, sticky="w", padx=6, pady=3)
 
         preview_frame = ttk.LabelFrame(frame, text="Preview", padding=8)
         preview_frame.grid(row=11, column=0, columnspan=3, sticky="nsew", pady=(10, 6))
-        ttk.Label(preview_frame, textvariable=preview_var, justify=tk.LEFT).pack(anchor="w")
+        visual_canvas = tk.Canvas(preview_frame, width=240, height=360, background="#d9d9d9", highlightthickness=0)
+        visual_canvas.pack(side=tk.LEFT, padx=(0, 10))
+        ttk.Label(preview_frame, textvariable=preview_var, justify=tk.LEFT, wraplength=420).pack(side=tk.LEFT, anchor="n")
 
         button_row = ttk.Frame(frame)
         button_row.grid(row=12, column=0, columnspan=3, sticky="ew", pady=(10, 0))
@@ -296,8 +343,8 @@ class SytistDashboard:
             anchor_x_var,
             anchor_y_var,
         ]:
-            variable.trace_add("write", refresh_preview)
-        refresh_preview()
+            variable.trace_add("write", live_preview)
+        live_preview()
 
     # ------------------------------------------------------------------
     # Keyring helpers — passwords are stored in the OS credential store

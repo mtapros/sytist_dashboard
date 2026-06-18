@@ -11,6 +11,9 @@ class AutoCropSuggestion:
     scale: float
     offset: list[int]
     method: str
+    status: str = "ok"
+    status_message: str = ""
+    face_bounds: tuple[float, float, float, float] | None = None
 
 
 DEFAULT_AUTOCROP_TEMPLATE_NAME = "Default Face"
@@ -123,6 +126,8 @@ def _default_centered_suggestion(source_img: Any, crop_size: tuple[int, int]) ->
             round((crop_h - resized_h) / 2),
         ],
         method="centered",
+        status="centered",
+        status_message="Centered fallback crop.",
     )
 
 
@@ -141,6 +146,9 @@ def _square_to_suggestion(
     y: float,
     size: float,
     method: str,
+    status: str = "ok",
+    status_message: str = "",
+    face_bounds: tuple[float, float, float, float] | None = None,
 ) -> AutoCropSuggestion:
     crop_w, crop_h = crop_size
     x, y, size = _clamp_square(x, y, size, source_img.width, source_img.height)
@@ -150,6 +158,9 @@ def _square_to_suggestion(
         scale=scale,
         offset=[round(-x * scale), round(-y * scale)],
         method=method,
+        status=status,
+        status_message=status_message,
+        face_bounds=face_bounds,
     )
 
 
@@ -227,12 +238,32 @@ def suggest_button_autocrop_from_template(
     fallback = _default_centered_suggestion(source_img, crop_size)
     template_obj = AutoCropTemplate.from_dict(template if isinstance(template, dict) else template.to_dict() if template else None)
     if template_obj.detector_mode == "centered":
-        return AutoCropSuggestion(scale=fallback.scale, offset=list(fallback.offset), method="template-centered")
+        return AutoCropSuggestion(
+            scale=fallback.scale,
+            offset=list(fallback.offset),
+            method="template-centered",
+            status="centered_mode",
+            status_message="Centered detector selected; face controls are not used.",
+        )
 
     detector = _MediaPipeFaceSquareDetector()
+    if not detector.available:
+        return AutoCropSuggestion(
+            scale=fallback.scale,
+            offset=list(fallback.offset),
+            method="centered",
+            status="mediapipe_unavailable",
+            status_message="MediaPipe is not installed; using centered fallback and ignoring face controls.",
+        )
     face_bounds = detector.detect_face_bounds(source_img)
     if not face_bounds:
-        return fallback
+        return AutoCropSuggestion(
+            scale=fallback.scale,
+            offset=list(fallback.offset),
+            method="centered",
+            status="no_face_detected",
+            status_message="No face was detected; using centered fallback and ignoring face controls.",
+        )
 
     face_x, face_y, face_w, face_h = face_bounds
     rect_x = face_x - face_w * template_obj.left_buffer
@@ -251,6 +282,9 @@ def suggest_button_autocrop_from_template(
         y=square_y,
         size=square_size,
         method=f"template:{template_obj.name}",
+        status="face_crop_applied",
+        status_message="Face detected; face controls are applied.",
+        face_bounds=face_bounds,
     )
 
 
@@ -258,9 +292,23 @@ def suggest_button_autocrop(source_img: Any, crop_size: tuple[int, int]) -> Auto
     """Suggest scale/offset for button design; falls back to centered crop."""
     fallback = _default_centered_suggestion(source_img, crop_size)
     detector = _MediaPipeFaceSquareDetector()
+    if not detector.available:
+        return AutoCropSuggestion(
+            scale=fallback.scale,
+            offset=list(fallback.offset),
+            method="centered",
+            status="mediapipe_unavailable",
+            status_message="MediaPipe is not installed; using centered fallback.",
+        )
     square = detector.detect_square(source_img)
     if not square:
-        return fallback
+        return AutoCropSuggestion(
+            scale=fallback.scale,
+            offset=list(fallback.offset),
+            method="centered",
+            status="no_face_detected",
+            status_message="No face was detected; using centered fallback.",
+        )
     x, y, size = square
     return _square_to_suggestion(
         source_img,
@@ -269,4 +317,6 @@ def suggest_button_autocrop(source_img: Any, crop_size: tuple[int, int]) -> Auto
         y=y,
         size=size,
         method="mediapipe-face",
+        status="face_crop_applied",
+        status_message="Face detected; face crop applied.",
     )

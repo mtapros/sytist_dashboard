@@ -24,19 +24,29 @@ class _DummyImage:
 class ButtonAutoCropTests(unittest.TestCase):
     def test_falls_back_to_centered_when_no_detection(self):
         image = _DummyImage(3000, 2000)
-        with mock.patch("button_autocrop._MediaPipeFaceSquareDetector.detect_square", return_value=None):
+        with mock.patch(
+            "button_autocrop._MediaPipeFaceSquareDetector.available",
+            new_callable=mock.PropertyMock,
+            return_value=True,
+        ), mock.patch("button_autocrop._MediaPipeFaceSquareDetector.detect_square", return_value=None):
             suggestion = suggest_button_autocrop(image, (1200, 1200))
         self.assertEqual(suggestion.method, "centered")
+        self.assertEqual(suggestion.status, "no_face_detected")
         self.assertEqual(suggestion.offset, [-300, 0])
 
     def test_uses_mediapipe_square_when_detection_available(self):
         image = _DummyImage(3000, 3000)
         with mock.patch(
+            "button_autocrop._MediaPipeFaceSquareDetector.available",
+            new_callable=mock.PropertyMock,
+            return_value=True,
+        ), mock.patch(
             "button_autocrop._MediaPipeFaceSquareDetector.detect_square",
             return_value=(600.0, 600.0, 1000.0),
         ):
             suggestion = suggest_button_autocrop(image, (1200, 1200))
         self.assertEqual(suggestion.method, "mediapipe-face")
+        self.assertEqual(suggestion.status, "face_crop_applied")
         self.assertEqual(suggestion.offset, [-720, -720])
         self.assertAlmostEqual(suggestion.scale, 1.2)
 
@@ -53,20 +63,56 @@ class ButtonAutoCropTests(unittest.TestCase):
             anchor_y=0.4,
         )
         with mock.patch(
+            "button_autocrop._MediaPipeFaceSquareDetector.available",
+            new_callable=mock.PropertyMock,
+            return_value=True,
+        ), mock.patch(
             "button_autocrop._MediaPipeFaceSquareDetector.detect_face_bounds",
             return_value=(1000.0, 800.0, 500.0, 600.0),
         ):
             suggestion = suggest_button_autocrop_from_template(image, (1200, 1200), template)
         self.assertEqual(suggestion.method, "template:Headroom")
+        self.assertEqual(suggestion.status, "face_crop_applied")
+        self.assertEqual(suggestion.status_message, "Face detected; face controls are applied.")
+        self.assertEqual(suggestion.face_bounds, (1000.0, 800.0, 500.0, 600.0))
         self.assertAlmostEqual(suggestion.scale, 1.0)
         self.assertEqual(suggestion.offset, [-650, -464])
 
     def test_template_autocrop_falls_back_to_centered_when_no_face_detected(self):
         image = _DummyImage(3000, 2000)
         template = AutoCropTemplate(name="Fallback Test")
-        with mock.patch("button_autocrop._MediaPipeFaceSquareDetector.detect_face_bounds", return_value=None):
+        with mock.patch(
+            "button_autocrop._MediaPipeFaceSquareDetector.available",
+            new_callable=mock.PropertyMock,
+            return_value=True,
+        ), mock.patch("button_autocrop._MediaPipeFaceSquareDetector.detect_face_bounds", return_value=None):
             suggestion = suggest_button_autocrop_from_template(image, (1200, 1200), template)
         self.assertEqual(suggestion.method, "centered")
+        self.assertEqual(suggestion.status, "no_face_detected")
+        self.assertIn("No face was detected", suggestion.status_message)
+        self.assertEqual(suggestion.offset, [-300, 0])
+
+    def test_template_autocrop_reports_centered_mode(self):
+        image = _DummyImage(3000, 2000)
+        template = AutoCropTemplate(name="Centered", detector_mode="centered")
+        suggestion = suggest_button_autocrop_from_template(image, (1200, 1200), template)
+        self.assertEqual(suggestion.method, "template-centered")
+        self.assertEqual(suggestion.status, "centered_mode")
+        self.assertIn("Centered detector selected", suggestion.status_message)
+        self.assertEqual(suggestion.offset, [-300, 0])
+
+    def test_template_autocrop_reports_mediapipe_unavailable(self):
+        image = _DummyImage(3000, 2000)
+        template = AutoCropTemplate(name="Fallback Test")
+        with mock.patch(
+            "button_autocrop._MediaPipeFaceSquareDetector.available",
+            new_callable=mock.PropertyMock,
+            return_value=False,
+        ):
+            suggestion = suggest_button_autocrop_from_template(image, (1200, 1200), template)
+        self.assertEqual(suggestion.method, "centered")
+        self.assertEqual(suggestion.status, "mediapipe_unavailable")
+        self.assertIn("MediaPipe is not installed", suggestion.status_message)
         self.assertEqual(suggestion.offset, [-300, 0])
 
     def test_normalize_template_store_adds_default_and_clamps_values(self):
