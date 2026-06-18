@@ -17,3 +17,7 @@ pywin32>=306
 # Without this package, passwords are held in memory only and must be
 # re-entered each session.
 keyring>=24.0.0
+
+# Optional face auto-crop support for button editor
+mediapipe
+numpy
