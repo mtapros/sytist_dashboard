@@ -14,11 +14,20 @@ from typing import Any
 
 # Valid status values.
 STATUS_QUEUED = "queued"
+STATUS_DESIGNED = "designed"
+STATUS_REQUEUED = "requeued"
 STATUS_PRINTED = "printed"
 STATUS_FAILED = "failed"
 STATUS_ARCHIVED = "archived"
 
-_VALID_STATUSES = {STATUS_QUEUED, STATUS_PRINTED, STATUS_FAILED, STATUS_ARCHIVED}
+_VALID_STATUSES = {
+    STATUS_QUEUED,
+    STATUS_DESIGNED,
+    STATUS_REQUEUED,
+    STATUS_PRINTED,
+    STATUS_FAILED,
+    STATUS_ARCHIVED,
+}
 
 
 class PrintQueueItem:
@@ -233,10 +242,26 @@ class PrintQueueStore:
             con.execute(
                 """
                 UPDATE print_queue
-                SET status = ?, archived_at = '', last_error = '', updated_at = ?
+                SET status = ?, printed = 0, printed_at = '', archived_at = '',
+                    last_error = '', updated_at = ?
                 WHERE id = ?
                 """,
-                (STATUS_QUEUED, now, item_id),
+                (STATUS_REQUEUED, now, item_id),
+            )
+            con.commit()
+
+    def mark_designed(self, item_id: int) -> None:
+        """Mark an item as having updated button design settings."""
+        now = datetime.now().isoformat(timespec="seconds")
+        with sqlite3.connect(self.db_path) as con:
+            con.execute(
+                """
+                UPDATE print_queue
+                SET status = ?, printed = 0, printed_at = '', archived_at = '',
+                    last_error = '', updated_at = ?
+                WHERE id = ?
+                """,
+                (STATUS_DESIGNED, now, item_id),
             )
             con.commit()
 
@@ -281,14 +306,48 @@ class PrintQueueStore:
             return [_row_to_item(r) for r in cur.fetchall()]
 
     def get_queued_only(self) -> list[PrintQueueItem]:
-        """Return items with status='queued' ordered by id ascending."""
+        """Return items pending print ordered by id ascending."""
         with sqlite3.connect(self.db_path) as con:
             con.row_factory = sqlite3.Row
             cur = con.execute(
-                "SELECT * FROM print_queue WHERE status = ? ORDER BY id ASC",
-                (STATUS_QUEUED,),
+                "SELECT * FROM print_queue WHERE status IN (?, ?, ?) ORDER BY id ASC",
+                (STATUS_QUEUED, STATUS_DESIGNED, STATUS_REQUEUED),
             )
             return [_row_to_item(r) for r in cur.fetchall()]
+
+    def find_prior_button_designs(
+        self,
+        *,
+        item_id: int,
+        product: str,
+        source: str,
+        size_key: str = "button",
+    ) -> list[PrintQueueItem]:
+        """Return prior queue items with matching source/product and saved button specs."""
+        if not product or not source:
+            return []
+        with sqlite3.connect(self.db_path) as con:
+            con.row_factory = sqlite3.Row
+            cur = con.execute(
+                """
+                SELECT * FROM print_queue
+                WHERE id < ?
+                  AND product = ?
+                  AND source = ?
+                  AND size_key = ?
+                  AND status != ?
+                ORDER BY id DESC
+                """,
+                (item_id, product, source, size_key, STATUS_ARCHIVED),
+            )
+            rows = cur.fetchall()
+        matches = []
+        for row in rows:
+            item = _row_to_item(row)
+            specs = ((item.render_settings or {}).get("button_specs") or {})
+            if isinstance(specs, dict) and specs:
+                matches.append(item)
+        return matches
 
     def get_archived(self) -> list[PrintQueueItem]:
         """Return archived items, newest first."""
