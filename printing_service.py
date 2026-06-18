@@ -662,16 +662,36 @@ class PrintingService:
             draw.text((20, y), line, fill="#444444", font=font)
             y += 36
 
-    def _center_crop_to_print_ratio(self, img, size_key):
+    def _center_crop_to_print_ratio(
+        self,
+        img,
+        size_key,
+        crop_scale: float = 1.0,
+        crop_offset_x: float = 0.0,
+        crop_offset_y: float = 0.0,
+    ):
         """Center-crop *img* to the target print aspect ratio for *size_key*.
 
         Returns *img* unchanged when *size_key* is not in PRINT_ASPECT_RATIOS
         (e.g. button, magnet, statuettes) so existing flows are unaffected.
+
+        When *crop_scale* != 1.0 the image is resized before cropping, giving a
+        zoom-in / zoom-out effect while keeping the output size correct.  The
+        *crop_offset_x* / *crop_offset_y* values shift the crop window left/right
+        or up/down in pixels (relative to the source after optional scaling).
+        Offsets are clamped so the crop stays within the image bounds.  All three
+        parameters default to their neutral values so existing callers are
+        unaffected.
         """
         ratio = PRINT_ASPECT_RATIOS.get(size_key)
         if ratio is None or not HAS_PIL:
             return img
         short_r, long_r = ratio
+        # Apply zoom/scale first.
+        if crop_scale != 1.0:
+            new_w = max(1, round(img.width * crop_scale))
+            new_h = max(1, round(img.height * crop_scale))
+            img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
         img_w, img_h = img.size
         if img_w <= img_h:
             # Portrait: width is the short side, height is the long side.
@@ -687,11 +707,23 @@ class PrintingService:
             if target_h > img_h:
                 target_h = img_h
                 target_w = round(img_h * long_r / short_r)
+        # Convert pixel offsets to centering fractions for ImageOps.fit.
+        # centering=(0.5, 0.5) is the default (centered); valid range is [0, 1].
+        slack_x = img_w - target_w
+        slack_y = img_h - target_h
+        if slack_x > 0:
+            cx = max(0.0, min(1.0, 0.5 + crop_offset_x / slack_x))
+        else:
+            cx = 0.5
+        if slack_y > 0:
+            cy = max(0.0, min(1.0, 0.5 + crop_offset_y / slack_y))
+        else:
+            cy = 0.5
         return ImageOps.fit(
             img,
             (target_w, target_h),
             method=Image.Resampling.LANCZOS,
-            centering=(0.5, 0.5),
+            centering=(cx, cy),
         )
 
     def _prepare_image_for_job(self, job: PrintJob):
@@ -703,7 +735,13 @@ class PrintingService:
         img = self._load_image_for_job(job)
         if job.size_key == "wallet":
             return self._build_wallet_sheet(img)
-        return self._center_crop_to_print_ratio(img, job.size_key)
+        return self._center_crop_to_print_ratio(
+            img,
+            job.size_key,
+            crop_scale=getattr(job, "crop_scale", 1.0) or 1.0,
+            crop_offset_x=getattr(job, "crop_offset_x", 0.0) or 0.0,
+            crop_offset_y=getattr(job, "crop_offset_y", 0.0) or 0.0,
+        )
 
     def execute_print_job(self, job: PrintJob, fallback_printer=None):
         if not HAS_WIN32 or not HAS_PIL:
