@@ -174,6 +174,7 @@ class SytistDashboard:
         scale_var = tk.StringVar(value=f"{current_template.scale_multiplier:.2f}")
         anchor_x_var = tk.StringVar(value=f"{current_template.anchor_x:.2f}")
         anchor_y_var = tk.StringVar(value=f"{current_template.anchor_y:.2f}")
+        confidence_var = tk.StringVar(value=f"{current_template.min_detection_confidence:.2f}")
         preview_var = tk.StringVar(value="")
         visual_preview_state = {"photo": None}
 
@@ -197,6 +198,7 @@ class SytistDashboard:
                     "scale_multiplier": scale_var.get(),
                     "anchor_x": anchor_x_var.get(),
                     "anchor_y": anchor_y_var.get(),
+                    "min_detection_confidence": confidence_var.get(),
                 }
             )
 
@@ -266,6 +268,7 @@ class SytistDashboard:
             scale_var.set(f"{selected_template.scale_multiplier:.2f}")
             anchor_x_var.set(f"{selected_template.anchor_x:.2f}")
             anchor_y_var.set(f"{selected_template.anchor_y:.2f}")
+            confidence_var.set(f"{selected_template.min_detection_confidence:.2f}")
             live_preview()
 
         def new_template():
@@ -280,6 +283,7 @@ class SytistDashboard:
             scale_var.set(f"{template.scale_multiplier:.2f}")
             anchor_x_var.set(f"{template.anchor_x:.2f}")
             anchor_y_var.set(f"{template.anchor_y:.2f}")
+            confidence_var.set(f"{template.min_detection_confidence:.2f}")
             live_preview()
 
         def preview_template():
@@ -313,25 +317,26 @@ class SytistDashboard:
             ("Face size / zoom", scale_var, 0.25, 5.0),
             ("Face horizontal position", anchor_x_var, 0.0, 1.0),
             ("Face vertical position", anchor_y_var, 0.0, 1.0),
+            ("Face detect confidence", confidence_var, 0.05, 0.95),
         ]
         for row_idx, (label_text, variable, min_value, max_value) in enumerate(fields, start=4):
             ttk.Label(frame, text=f"{label_text}:").grid(row=row_idx, column=0, sticky="w", pady=3)
             ttk.Spinbox(frame, from_=min_value, to=max_value, increment=0.05, textvariable=variable, width=10).grid(row=row_idx, column=1, sticky="w", padx=6, pady=3)
 
         preview_frame = ttk.LabelFrame(frame, text="Preview", padding=8)
-        preview_frame.grid(row=11, column=0, columnspan=3, sticky="nsew", pady=(10, 6))
+        preview_frame.grid(row=12, column=0, columnspan=3, sticky="nsew", pady=(10, 6))
         visual_canvas = tk.Canvas(preview_frame, width=240, height=360, background="#d9d9d9", highlightthickness=0)
         visual_canvas.pack(side=tk.LEFT, padx=(0, 10))
         ttk.Label(preview_frame, textvariable=preview_var, justify=tk.LEFT, wraplength=420).pack(side=tk.LEFT, anchor="n")
 
         button_row = ttk.Frame(frame)
-        button_row.grid(row=12, column=0, columnspan=3, sticky="ew", pady=(10, 0))
+        button_row.grid(row=13, column=0, columnspan=3, sticky="ew", pady=(10, 0))
         ttk.Button(button_row, text="Preview in Designer", command=preview_template).pack(side=tk.LEFT, padx=4)
         ttk.Button(button_row, text="Save / Update Template", command=save_template).pack(side=tk.LEFT, padx=4)
         ttk.Button(button_row, text="Close", command=dialog.destroy).pack(side=tk.RIGHT, padx=4)
 
         frame.columnconfigure(1, weight=1)
-        frame.rowconfigure(11, weight=1)
+        frame.rowconfigure(12, weight=1)
         for variable in [
             name_var,
             detector_var,
@@ -343,6 +348,7 @@ class SytistDashboard:
             scale_var,
             anchor_x_var,
             anchor_y_var,
+            confidence_var,
         ]:
             variable.trace_add("write", live_preview)
         live_preview()

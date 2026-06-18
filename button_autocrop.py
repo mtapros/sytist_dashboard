@@ -24,6 +24,7 @@ class AutoCropSuggestion:
 DEFAULT_AUTOCROP_TEMPLATE_NAME = "Default Face"
 _LOCAL_FACE_MODEL_ENV = "SYTIST_MEDIAPIPE_FACE_MODEL"
 _LOCAL_FACE_MODEL_FILENAME = "blaze_face_short_range.tflite"
+DEFAULT_MIN_DETECTION_CONFIDENCE = 0.3
 
 
 @dataclass(frozen=True)
@@ -38,6 +39,7 @@ class AutoCropTemplate:
     scale_multiplier: float = 1.0
     anchor_x: float = 0.5
     anchor_y: float = 0.5
+    min_detection_confidence: float = DEFAULT_MIN_DETECTION_CONFIDENCE
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -51,6 +53,7 @@ class AutoCropTemplate:
             "scale_multiplier": self.scale_multiplier,
             "anchor_x": self.anchor_x,
             "anchor_y": self.anchor_y,
+            "min_detection_confidence": self.min_detection_confidence,
         }
 
     @classmethod
@@ -82,6 +85,12 @@ class AutoCropTemplate:
             scale_multiplier=_float("scale_multiplier", 1.0, min_value=0.25, max_value=5.0),
             anchor_x=_float("anchor_x", 0.5, min_value=0.0, max_value=1.0),
             anchor_y=_float("anchor_y", 0.5, min_value=0.0, max_value=1.0),
+            min_detection_confidence=_float(
+                "min_detection_confidence",
+                DEFAULT_MIN_DETECTION_CONFIDENCE,
+                min_value=0.05,
+                max_value=0.95,
+            ),
         )
 
 
@@ -225,13 +234,14 @@ class _MediaPipeFaceSquareDetector:
     """Best-effort local MediaPipe Tasks detector; returns face bounds and square crop."""
 
     _shared_lock = threading.Lock()
-    _shared_detector = None
+    _shared_detectors: dict[float, Any] = {}
     _shared_import_error: str | None = None
     _shared_model_path: Path | None = None
 
-    def __init__(self) -> None:
+    def __init__(self, *, min_detection_confidence: float = DEFAULT_MIN_DETECTION_CONFIDENCE) -> None:
         self._mp = None
         self._np = None
+        self.min_detection_confidence = max(0.05, min(float(min_detection_confidence), 0.95))
         try:
             import mediapipe as mp  # type: ignore
             import numpy as np  # type: ignore
@@ -272,8 +282,10 @@ class _MediaPipeFaceSquareDetector:
         if self._mp is None:
             return None
         with self.__class__._shared_lock:
-            if self.__class__._shared_detector is not None:
-                return self.__class__._shared_detector
+            confidence_key = round(self.min_detection_confidence, 2)
+            cached = self.__class__._shared_detectors.get(confidence_key)
+            if cached is not None:
+                return cached
 
             model_path = self._resolve_model_path()
             if model_path is None:
@@ -296,19 +308,24 @@ class _MediaPipeFaceSquareDetector:
                 options = FaceDetectorOptions(
                     base_options=BaseOptions(model_asset_path=str(model_path)),
                     running_mode=RunningMode.IMAGE,
-                    min_detection_confidence=0.5,
+                    min_detection_confidence=self.min_detection_confidence,
                 )
-                self.__class__._shared_detector = FaceDetector.create_from_options(options)
+                detector = FaceDetector.create_from_options(options)
+                self.__class__._shared_detectors[confidence_key] = detector
                 self.__class__._shared_model_path = model_path
                 self.__class__._shared_import_error = None
-                logger.info("Initialized local MediaPipe Tasks face detector from %s.", model_path)
+                logger.info(
+                    "Initialized local MediaPipe Tasks face detector from %s with confidence %.2f.",
+                    model_path,
+                    self.min_detection_confidence,
+                )
             except Exception as exc:
-                self.__class__._shared_detector = None
+                self.__class__._shared_detectors.pop(confidence_key, None)
                 self.__class__._shared_import_error = f"Failed to initialize local MediaPipe face detector: {exc}"
                 logger.warning("Failed to initialize local MediaPipe face detector: %s", exc)
                 return None
 
-            return self.__class__._shared_detector
+            return self.__class__._shared_detectors.get(confidence_key)
 
     def detect_square(self, source_img: Any) -> tuple[float, float, float] | None:
         face_bounds = self.detect_face_bounds(source_img)
@@ -390,7 +407,7 @@ def suggest_button_autocrop_from_template(
             status_message="Centered detector selected; face controls are not used.",
         )
 
-    detector = _MediaPipeFaceSquareDetector()
+    detector = _MediaPipeFaceSquareDetector(min_detection_confidence=template_obj.min_detection_confidence)
     if not detector.available:
         reason = detector.unavailable_reason()
         logger.warning("Template '%s': %s Falling back to centered crop.", template_obj.name, reason)
