@@ -114,7 +114,7 @@ class ButtonAutoCropTests(unittest.TestCase):
             suggestion = suggest_button_autocrop_from_template(image, (1200, 1200), template)
         self.assertEqual(suggestion.method, "centered")
         self.assertEqual(suggestion.status, "mediapipe_unavailable")
-        self.assertIn("MediaPipe is not installed", suggestion.status_message)
+        self.assertIn("Using centered fallback", suggestion.status_message)
         self.assertEqual(suggestion.offset, [-300, 0])
 
     def test_status_line_formats_key_autocrop_outcomes(self):
@@ -162,6 +162,7 @@ class ButtonAutoCropTests(unittest.TestCase):
                         "scale_multiplier": "0",
                         "anchor_x": "2",
                         "anchor_y": "-1",
+                        "min_detection_confidence": "0.01",
                     }
                 },
             }
@@ -173,6 +174,17 @@ class ButtonAutoCropTests(unittest.TestCase):
         self.assertEqual(custom["scale_multiplier"], 0.25)
         self.assertEqual(custom["anchor_x"], 1.0)
         self.assertEqual(custom["anchor_y"], 0.0)
+        self.assertEqual(custom["min_detection_confidence"], 0.05)
+
+    def test_template_persists_detection_confidence(self):
+        template = AutoCropTemplate.from_dict(
+            {
+                "name": "Loose Detector",
+                "min_detection_confidence": "0.25",
+            }
+        )
+        self.assertEqual(template.min_detection_confidence, 0.25)
+        self.assertEqual(template.to_dict()["min_detection_confidence"], 0.25)
 
 
 if __name__ == "__main__":
