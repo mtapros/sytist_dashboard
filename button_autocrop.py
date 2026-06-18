@@ -192,20 +192,31 @@ def _candidate_face_model_paths() -> list[Path]:
         paths.append(Path(env_value).expanduser())
 
     here = Path(__file__).resolve().parent
-    paths.extend(
-        [
-            here / _LOCAL_FACE_MODEL_FILENAME,
-            here / "models" / _LOCAL_FACE_MODEL_FILENAME,
-            Path.home() / ".volumetoolkit_vtk" / "models" / _LOCAL_FACE_MODEL_FILENAME,
-        ]
-    )
+    repo_root = here
+    for parent in [here, *here.parents]:
+        if (parent / ".git").exists() or (parent / "requirements.txt").exists() or (parent / "pyproject.toml").exists():
+            repo_root = parent
+            break
+
+    candidate_dirs = [
+        here,
+        here / "models",
+        repo_root,
+        repo_root / "models",
+        Path.cwd(),
+        Path.cwd() / "models",
+        Path.home() / ".volumetoolkit_vtk" / "models",
+    ]
+
+    for directory in candidate_dirs:
+        paths.append(directory / _LOCAL_FACE_MODEL_FILENAME)
 
     unique: list[Path] = []
     seen: set[str] = set()
     for path in paths:
-        key = str(path)
+        key = str(path.expanduser())
         if key not in seen:
-            unique.append(path)
+            unique.append(path.expanduser())
             seen.add(key)
     return unique
 
