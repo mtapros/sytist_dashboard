@@ -1971,8 +1971,8 @@ class SytistDashboard:
         return None
 
     def open_address_print_dialog(self):
-        if not HAS_WIN32 or not HAS_PIL:
-            messagebox.showerror("Missing Library", "Please run: pip install pywin32 pillow")
+        if not HAS_PIL:
+            messagebox.showerror("Missing Library", "Please run: pip install pillow")
             return
 
         order = self.get_address_prefill_order()
@@ -1980,7 +1980,7 @@ class SytistDashboard:
 
         top = tk.Toplevel(self.root)
         top.title("Print 4x6 Address")
-        top.geometry("760x360")
+        top.geometry("900x620")
         top.transient(self.root)
         top.grab_set()
 
@@ -2014,33 +2014,185 @@ class SytistDashboard:
 
         preview_note = ttk.Label(
             frame,
-            text="The address block prints centered on a 4x6 landscape card at 60% of the 6-inch width.",
+            text="4x6 landscape label preview/print. Enter an address OR custom multiline text.",
             foreground="#666666",
             wraplength=700,
             justify=tk.LEFT,
         )
         preview_note.grid(row=5, column=0, columnspan=4, sticky="w", pady=(8, 0))
 
+        ttk.Label(frame, text="Custom Label Text:").grid(row=6, column=0, sticky="nw", padx=(0, 8), pady=4)
+        custom_text_widget = tk.Text(frame, height=6, width=60, wrap=tk.WORD)
+        custom_text_widget.grid(row=6, column=1, columnspan=3, sticky="ew", pady=4)
+        custom_text_widget.insert("1.0", str(getattr(default_address, "custom_text", "") or ""))
+
+        mailing_cfg = self.config.setdefault("mailing_label", {})
+        brands_cfg = mailing_cfg.setdefault("brands", {})
+        if not isinstance(brands_cfg, dict):
+            brands_cfg = {}
+            mailing_cfg["brands"] = brands_cfg
+        if not brands_cfg:
+            brands_cfg["Default"] = {"logo_path": "", "logo_scale": 1.0, "logo_x": 40, "logo_y": 40}
+
+        def _ensure_brand_defaults(brand_name):
+            brand_cfg = brands_cfg.setdefault(brand_name, {})
+            brand_cfg.setdefault("logo_path", "")
+            try:
+                brand_cfg["logo_scale"] = max(0.1, min(5.0, float(brand_cfg.get("logo_scale", 1.0))))
+            except (TypeError, ValueError):
+                brand_cfg["logo_scale"] = 1.0
+            try:
+                brand_cfg["logo_x"] = int(round(float(brand_cfg.get("logo_x", 40))))
+            except (TypeError, ValueError):
+                brand_cfg["logo_x"] = 40
+            try:
+                brand_cfg["logo_y"] = int(round(float(brand_cfg.get("logo_y", 40))))
+            except (TypeError, ValueError):
+                brand_cfg["logo_y"] = 40
+            return brand_cfg
+
+        selected_brand = str(mailing_cfg.get("selected_brand", "") or "").strip()
+        if not selected_brand or selected_brand not in brands_cfg:
+            selected_brand = next(iter(brands_cfg.keys()))
+            mailing_cfg["selected_brand"] = selected_brand
+        _ensure_brand_defaults(selected_brand)
+
+        brand_var = tk.StringVar(value=selected_brand)
+        logo_path_var = tk.StringVar(value="")
+        logo_scale_var = tk.DoubleVar(value=1.0)
+        logo_x_var = tk.IntVar(value=40)
+        logo_y_var = tk.IntVar(value=40)
+
+        ttk.Label(frame, text="Brand:").grid(row=7, column=0, sticky="w", padx=(0, 8), pady=4)
+        brand_combo = ttk.Combobox(frame, textvariable=brand_var, state="readonly", values=sorted(brands_cfg.keys()))
+        brand_combo.grid(row=7, column=1, sticky="ew", pady=4)
+
+        ttk.Label(frame, text="Logo PNG:").grid(row=8, column=0, sticky="w", padx=(0, 8), pady=4)
+        ttk.Entry(frame, textvariable=logo_path_var).grid(row=8, column=1, columnspan=2, sticky="ew", pady=4)
+
+        def choose_logo():
+            logo_path = filedialog.askopenfilename(
+                parent=top,
+                title="Select Brand Logo (PNG)",
+                filetypes=[("PNG files", "*.png"), ("All files", "*.*")],
+            )
+            if logo_path:
+                logo_path_var.set(logo_path)
+
+        ttk.Button(frame, text="Browse…", command=choose_logo).grid(row=8, column=3, sticky="e", pady=4)
+
+        ttk.Label(frame, text="Logo Scale:").grid(row=9, column=0, sticky="w", padx=(0, 8), pady=4)
+        scale_spin = ttk.Spinbox(frame, from_=0.1, to=5.0, increment=0.1, textvariable=logo_scale_var, width=10)
+        scale_spin.grid(row=9, column=1, sticky="w", pady=4)
+        ttk.Label(frame, text="Logo X:").grid(row=9, column=2, sticky="e", padx=(0, 8), pady=4)
+        ttk.Spinbox(frame, from_=-1800, to=1800, increment=1, textvariable=logo_x_var, width=10).grid(row=9, column=3, sticky="w", pady=4)
+        ttk.Label(frame, text="Logo Y:").grid(row=10, column=2, sticky="e", padx=(0, 8), pady=4)
+        ttk.Spinbox(frame, from_=-1200, to=1200, increment=1, textvariable=logo_y_var, width=10).grid(row=10, column=3, sticky="w", pady=4)
+
+        def save_brand_settings():
+            brand_name = brand_var.get().strip()
+            if not brand_name:
+                return
+            brand_cfg = _ensure_brand_defaults(brand_name)
+            brand_cfg["logo_path"] = logo_path_var.get().strip()
+            try:
+                brand_cfg["logo_scale"] = max(0.1, min(5.0, float(logo_scale_var.get())))
+            except (TypeError, ValueError, tk.TclError):
+                brand_cfg["logo_scale"] = 1.0
+            try:
+                brand_cfg["logo_x"] = int(round(float(logo_x_var.get())))
+            except (TypeError, ValueError, tk.TclError):
+                brand_cfg["logo_x"] = 40
+            try:
+                brand_cfg["logo_y"] = int(round(float(logo_y_var.get())))
+            except (TypeError, ValueError, tk.TclError):
+                brand_cfg["logo_y"] = 40
+            mailing_cfg["selected_brand"] = brand_name
+
+        def load_brand_settings(brand_name):
+            brand_cfg = _ensure_brand_defaults(brand_name)
+            logo_path_var.set(str(brand_cfg.get("logo_path", "") or ""))
+            logo_scale_var.set(float(brand_cfg.get("logo_scale", 1.0)))
+            logo_x_var.set(int(brand_cfg.get("logo_x", 40)))
+            logo_y_var.set(int(brand_cfg.get("logo_y", 40)))
+
+        def on_brand_selected(event=None):
+            save_brand_settings()
+            load_brand_settings(brand_var.get().strip())
+
+        def create_brand():
+            new_name = simpledialog.askstring("New Brand", "Enter brand name:", parent=top)
+            if not new_name:
+                return
+            new_name = new_name.strip()
+            if not new_name:
+                return
+            if new_name in brands_cfg:
+                messagebox.showinfo("Brand Exists", f"{new_name} already exists.", parent=top)
+                brand_var.set(new_name)
+                load_brand_settings(new_name)
+                return
+            brands_cfg[new_name] = {"logo_path": "", "logo_scale": 1.0, "logo_x": 40, "logo_y": 40}
+            values = sorted(brands_cfg.keys())
+            brand_combo.configure(values=values)
+            brand_var.set(new_name)
+            load_brand_settings(new_name)
+
+        ttk.Button(frame, text="New Brand", command=create_brand).grid(row=7, column=2, sticky="w", padx=4, pady=4)
+        brand_combo.bind("<<ComboboxSelected>>", on_brand_selected)
+        load_brand_settings(selected_brand)
+
         for col in range(4):
             frame.columnconfigure(col, weight=1 if col in {1, 3} else 0)
 
         def build_address():
-            return ShippingAddress(**{key: var.get().strip() for key, var in vars_map.items()})
+            payload = {key: var.get().strip() for key, var in vars_map.items()}
+            payload["custom_text"] = custom_text_widget.get("1.0", "end").strip()
+            return ShippingAddress(**payload)
+
+        def build_label_options():
+            return {
+                "brand": brand_var.get().strip(),
+                "logo_path": logo_path_var.get().strip(),
+                "logo_scale": logo_scale_var.get(),
+                "logo_x": logo_x_var.get(),
+                "logo_y": logo_y_var.get(),
+            }
+
+        def show_preview():
+            save_brand_settings()
+            self.save_config()
+            address = build_address()
+            lines = self.printing_service._address_lines_for_label(address)
+            if not lines:
+                messagebox.showwarning("Missing Label Content", "Enter address fields and/or custom label text.", parent=top)
+                return
+            rendered = self.printing_service._render_address_label(address, build_label_options())
+            preview = rendered.copy()
+            preview.thumbnail((720, 420), Image.Resampling.LANCZOS)
+            preview_window = tk.Toplevel(top)
+            preview_window.title("4x6 Label Preview")
+            preview_window.transient(top)
+            holder = ttk.Frame(preview_window, padding=10)
+            holder.pack(fill=tk.BOTH, expand=True)
+            ttk.Label(holder, text="Preview scaled to fit window (actual print is 4x6 landscape).", foreground="#666666").pack(anchor="w", pady=(0, 8))
+            photo = ImageTk.PhotoImage(preview)
+            image_label = ttk.Label(holder, image=photo)
+            image_label.image = photo
+            image_label.pack(fill=tk.BOTH, expand=True)
+            ttk.Button(holder, text="Close", command=preview_window.destroy).pack(anchor="e", pady=(8, 0))
 
         def print_address():
+            if not HAS_WIN32:
+                messagebox.showerror("Missing Library", "Please run: pip install pywin32")
+                return
             address = build_address()
-            required = {
-                "Full Name": address.full_name,
-                "Address 1": address.address_1,
-                "City": address.city,
-                "State": address.state,
-                "Postal Code": address.postal_code,
-            }
-            missing = [label for label, value in required.items() if not str(value or "").strip()]
-            if missing:
-                messagebox.showwarning("Missing Address Fields", "Please fill: " + ", ".join(missing))
+            if not self.printing_service._address_lines_for_label(address):
+                messagebox.showwarning("Missing Label Content", "Enter address fields and/or custom label text.", parent=top)
                 return
 
+            save_brand_settings()
+            self.save_config()
             top.destroy()
             self.start_print_workflow(
                 [
@@ -2051,13 +2203,15 @@ class SytistDashboard:
                         product="4x6 Address Label",
                         size_key="4x6",
                         address=address,
+                        label_options=build_label_options(),
                     )
                 ],
                 "4x6 Address Print",
             )
 
         button_row = ttk.Frame(frame)
-        button_row.grid(row=6, column=0, columnspan=4, sticky="e", pady=(16, 0))
+        button_row.grid(row=11, column=0, columnspan=4, sticky="e", pady=(16, 0))
+        ttk.Button(button_row, text="Preview", command=show_preview).pack(side=tk.LEFT, padx=4)
         ttk.Button(button_row, text="Print", command=print_address).pack(side=tk.LEFT, padx=4)
         ttk.Button(button_row, text="Cancel", command=top.destroy).pack(side=tk.LEFT, padx=4)
 

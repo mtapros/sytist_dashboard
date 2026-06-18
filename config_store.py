@@ -47,7 +47,18 @@ DEFAULT_CONFIG = {
             "phone": "",
             "email": "",
         },
-    }
+    },
+    "mailing_label": {
+        "selected_brand": "Default",
+        "brands": {
+            "Default": {
+                "logo_path": "",
+                "logo_scale": 1.0,
+                "logo_x": 40,
+                "logo_y": 40,
+            }
+        },
+    },
 }
 
 
@@ -93,6 +104,7 @@ class ConfigStore:
         config.setdefault("db_presets", {})
         config.setdefault("printer_routes", {})
         config.setdefault("usps", {})
+        config.setdefault("mailing_label", {})
 
         for key in ["4x6", "4x5", "5x7", "8x10", "wallet", "button", "magnet", "7in", "10in"]:
             config["printer_routes"].setdefault(key, "")
@@ -116,6 +128,37 @@ class ConfigStore:
         ship_from.setdefault("country", "US")
         ship_from.setdefault("phone", "")
         ship_from.setdefault("email", "")
+
+        mailing_label = config["mailing_label"]
+        mailing_label.setdefault("selected_brand", "Default")
+        mailing_label.setdefault("brands", {})
+        brands = mailing_label["brands"]
+        if not isinstance(brands, dict):
+            brands = {}
+            mailing_label["brands"] = brands
+        if not brands:
+            brands["Default"] = {}
+        for brand_name, brand_data in list(brands.items()):
+            if not isinstance(brand_data, dict):
+                brand_data = {}
+                brands[brand_name] = brand_data
+            brand_data.setdefault("logo_path", "")
+            try:
+                brand_data["logo_scale"] = max(0.1, min(5.0, float(brand_data.get("logo_scale", 1.0))))
+            except (TypeError, ValueError):
+                brand_data["logo_scale"] = 1.0
+            try:
+                brand_data["logo_x"] = int(round(float(brand_data.get("logo_x", 40))))
+            except (TypeError, ValueError):
+                brand_data["logo_x"] = 40
+            try:
+                brand_data["logo_y"] = int(round(float(brand_data.get("logo_y", 40))))
+            except (TypeError, ValueError):
+                brand_data["logo_y"] = 40
+
+        selected_brand = str(mailing_label.get("selected_brand", "")).strip()
+        if not selected_brand or selected_brand not in brands:
+            mailing_label["selected_brand"] = next(iter(brands.keys()))
 
         legacy_has_fields = any(key in config for key in ["host", "db_name", "db_user", "db_pass"])
         if legacy_has_fields:

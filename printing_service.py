@@ -173,6 +173,12 @@ class PrintingService:
         if not address:
             return []
 
+        custom_text = str(getattr(address, "custom_text", "") or "").strip()
+        if custom_text:
+            lines = [line.strip() for line in custom_text.splitlines() if line.strip()]
+            if lines:
+                return lines
+
         lines = []
         for value in [address.full_name, address.address_1, address.address_2]:
             text = str(value or "").strip()
@@ -210,6 +216,21 @@ class PrintingService:
         bbox = draw.textbbox((0, 0), text, font=font)
         return bbox[2] - bbox[0], bbox[3] - bbox[1]
 
+    @staticmethod
+    def _clamp_logo_scale(value, default=1.0):
+        try:
+            scale = float(value)
+        except (TypeError, ValueError):
+            scale = default
+        return max(0.1, min(5.0, scale))
+
+    @staticmethod
+    def _coerce_int(value, default=0):
+        try:
+            return int(round(float(value)))
+        except (TypeError, ValueError):
+            return default
+
     def _wrap_text_for_width(self, draw, text, font, max_width):
         words = text.split()
         if not words:
@@ -228,7 +249,27 @@ class PrintingService:
         lines.append(current)
         return lines
 
-    def _render_address_label(self, address: ShippingAddress):
+    def _draw_label_logo(self, img, label_options):
+        if not label_options:
+            return
+        logo_path = str((label_options or {}).get("logo_path", "") or "").strip()
+        if not logo_path:
+            return
+        try:
+            logo = Image.open(logo_path).convert("RGBA")
+        except Exception:
+            return
+
+        scale = self._clamp_logo_scale((label_options or {}).get("logo_scale", 1.0))
+        logo_w = max(1, int(round(logo.width * scale)))
+        logo_h = max(1, int(round(logo.height * scale)))
+        logo = logo.resize((logo_w, logo_h), Image.Resampling.LANCZOS)
+
+        x = self._coerce_int((label_options or {}).get("logo_x", 40), 40)
+        y = self._coerce_int((label_options or {}).get("logo_y", 40), 40)
+        img.paste(logo, (x, y), logo)
+
+    def _render_address_label(self, address: ShippingAddress, label_options=None):
         if not HAS_PIL:
             raise RuntimeError("Please run: pip install pillow")
 
@@ -279,6 +320,7 @@ class PrintingService:
             y += height
             if idx < len(selected_lines) - 1:
                 y += selected_spacing
+        self._draw_label_logo(img, label_options)
         return img
 
     def _build_wallet_sheet(self, img):
@@ -654,7 +696,7 @@ class PrintingService:
 
     def _prepare_image_for_job(self, job: PrintJob):
         if job.source_type == "address":
-            return self._render_address_label(job.address)
+            return self._render_address_label(job.address, getattr(job, "label_options", None))
         if job.source_type == "pil":
             img = job.source
             return img.convert("RGB") if img.mode != "RGB" else img
