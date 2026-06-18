@@ -14,11 +14,20 @@ from typing import Any
 
 # Valid status values.
 STATUS_QUEUED = "queued"
+STATUS_DESIGNED = "designed"
+STATUS_REQUEUED = "requeued"
 STATUS_PRINTED = "printed"
 STATUS_FAILED = "failed"
 STATUS_ARCHIVED = "archived"
 
-_VALID_STATUSES = {STATUS_QUEUED, STATUS_PRINTED, STATUS_FAILED, STATUS_ARCHIVED}
+_VALID_STATUSES = {
+    STATUS_QUEUED,
+    STATUS_DESIGNED,
+    STATUS_REQUEUED,
+    STATUS_PRINTED,
+    STATUS_FAILED,
+    STATUS_ARCHIVED,
+}
 
 
 class PrintQueueItem:
@@ -233,10 +242,10 @@ class PrintQueueStore:
             con.execute(
                 """
                 UPDATE print_queue
-                SET status = ?, archived_at = '', last_error = '', updated_at = ?
+                SET status = ?, printed = 0, printed_at = '', archived_at = '', last_error = '', updated_at = ?
                 WHERE id = ?
                 """,
-                (STATUS_QUEUED, now, item_id),
+                (STATUS_REQUEUED, now, item_id),
             )
             con.commit()
 
@@ -256,6 +265,28 @@ class PrintQueueStore:
             con.execute(
                 "UPDATE print_queue SET render_settings = ?, updated_at = ? WHERE id = ?",
                 (json.dumps(render_settings), now, item_id),
+            )
+            con.commit()
+
+    def apply_button_design(
+        self,
+        item_id: int,
+        *,
+        render_settings: dict[str, Any],
+        product: str = "Button",
+        size_key: str = "button",
+    ) -> None:
+        """Persist button specs onto an existing queue item and mark it as designed."""
+        now = datetime.now().isoformat(timespec="seconds")
+        with sqlite3.connect(self.db_path) as con:
+            con.execute(
+                """
+                UPDATE print_queue
+                SET status = ?, printed = 0, printed_at = '', archived_at = '', last_error = '',
+                    product = ?, size_key = ?, render_settings = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (STATUS_DESIGNED, product, size_key, json.dumps(render_settings or {}), now, item_id),
             )
             con.commit()
 
@@ -285,8 +316,8 @@ class PrintQueueStore:
         with sqlite3.connect(self.db_path) as con:
             con.row_factory = sqlite3.Row
             cur = con.execute(
-                "SELECT * FROM print_queue WHERE status = ? ORDER BY id ASC",
-                (STATUS_QUEUED,),
+                "SELECT * FROM print_queue WHERE status IN (?, ?, ?) ORDER BY id ASC",
+                (STATUS_QUEUED, STATUS_DESIGNED, STATUS_REQUEUED),
             )
             return [_row_to_item(r) for r in cur.fetchall()]
 

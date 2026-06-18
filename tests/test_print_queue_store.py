@@ -10,9 +10,11 @@ import unittest
 
 from print_queue_store import (
     STATUS_ARCHIVED,
+    STATUS_DESIGNED,
     STATUS_FAILED,
     STATUS_PRINTED,
     STATUS_QUEUED,
+    STATUS_REQUEUED,
     PrintQueueItem,
     PrintQueueStore,
 )
@@ -139,7 +141,9 @@ class PrintQueueStoreStatusTests(unittest.TestCase):
         self.store.mark_printed(self.item_id)
         self.store.requeue(self.item_id)
         item = self.store.get_item(self.item_id)
-        self.assertEqual(item.status, STATUS_QUEUED)
+        self.assertEqual(item.status, STATUS_REQUEUED)
+        self.assertFalse(item.printed)
+        self.assertEqual(item.printed_at, "")
 
     def test_increment_reprint_count(self):
         self.store.increment_reprint_count(self.item_id)
@@ -153,6 +157,18 @@ class PrintQueueStoreStatusTests(unittest.TestCase):
         item = self.store.get_item(self.item_id)
         self.assertEqual(item.render_settings["crop_scale"], 1.5)
         self.assertEqual(item.render_settings["crop_offset_x"], -20)
+
+    def test_apply_button_design(self):
+        self.store.apply_button_design(
+            self.item_id,
+            render_settings={"button_specs": {"text": "Hi"}},
+            product="Button",
+            size_key="button",
+        )
+        item = self.store.get_item(self.item_id)
+        self.assertEqual(item.status, STATUS_DESIGNED)
+        self.assertEqual(item.size_key, "button")
+        self.assertEqual(item.render_settings["button_specs"]["text"], "Hi")
 
 
 class PrintQueueStoreQueryTests(unittest.TestCase):
@@ -180,6 +196,18 @@ class PrintQueueStoreQueryTests(unittest.TestCase):
         self.assertIn(self.id_queued, ids)
         self.assertNotIn(self.id_printed, ids)
         self.assertNotIn(self.id_archived, ids)
+
+    def test_get_queued_only_includes_designed_and_requeued(self):
+        id_designed = self.store.enqueue(source_type="file", display_name="d.jpg")
+        self.store.apply_button_design(id_designed, render_settings={"button_specs": {"text": "x"}})
+        id_requeued = self.store.enqueue(source_type="file", display_name="r.jpg")
+        self.store.mark_printed(id_requeued)
+        self.store.requeue(id_requeued)
+
+        items = self.store.get_queued_only()
+        ids = [i.id for i in items]
+        self.assertIn(id_designed, ids)
+        self.assertIn(id_requeued, ids)
 
     def test_get_archived(self):
         items = self.store.get_archived()

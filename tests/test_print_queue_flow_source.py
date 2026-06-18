@@ -71,6 +71,20 @@ class PrintQueueFlowSourceTests(unittest.TestCase):
         self.assertIn('qi.source_type == "button" or qi.size_key == "button"', method_src)
         self.assertIn("render_button_sheet", method_src)
 
+    def test_queue_button_editor_checks_for_duplicate_designs(self):
+        method_src = _get_method_src("_open_button_editor_for_queue_item")
+        self.assertIsNotNone(method_src)
+        self.assertIn("_find_prior_button_design_match", method_src)
+        self.assertIn("askyesnocancel", method_src)
+        self.assertIn("_apply_button_specs_to_queue_item", method_src)
+
+    def test_open_button_editor_from_specs_updates_existing_queue_item(self):
+        method_src = _get_method_src("open_button_print_editor_from_specs")
+        self.assertIsNotNone(method_src)
+        self.assertIn("queue_item_id", method_src)
+        self.assertIn("_apply_button_specs_to_queue_item", method_src)
+        self.assertIn('"Apply to Queue"', method_src)
+
 
 if __name__ == "__main__":
     unittest.main()
