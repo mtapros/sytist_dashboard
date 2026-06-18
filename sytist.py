@@ -21,7 +21,8 @@ from data_loader import HAS_MYSQL, SytistDataLoader
 from dialogs import Dialogs
 from export_service import ExportService, _safe_qty
 from models import CartItem, Order, PackageDetails, PhotoPath, PrintJob, ShippingAddress
-from print_queue_store import PrintQueueStore, STATUS_QUEUED
+from print_queue_store import PrintQueueStore
+from button_autocrop import suggest_button_autocrop
 from printing_service import (
     BUTTON_CROP_SIZE,
     BUTTON_DEFAULT_DIAMETER,
@@ -1611,10 +1612,11 @@ class SytistDashboard:
         state["scale"] = initial_scale
         resized_w = round(source_img.width * initial_scale)
         resized_h = round(source_img.height * initial_scale)
-        state["offset"] = [
-            round((crop_w - resized_w) / 2),
-            round((crop_h - resized_h) / 2),
-        ]
+        state["offset"] = [round((crop_w - resized_w) / 2), round((crop_h - resized_h) / 2)]
+        auto_crop = suggest_button_autocrop(source_img, crop_size=BUTTON_CROP_SIZE)
+        if auto_crop:
+            state["scale"] = auto_crop["scale"]
+            state["offset"] = list(auto_crop["offset"])
 
         ttk.Label(
             top,
@@ -2038,16 +2040,27 @@ class SytistDashboard:
                 parent=top,
             )
 
+        def apply_auto_fit():
+            auto = suggest_button_autocrop(source_img, crop_size=BUTTON_CROP_SIZE)
+            if not auto:
+                messagebox.showinfo("Auto Fit", "No face landmarks were detected. Keeping current framing.", parent=top)
+                return
+            state["scale"] = auto["scale"]
+            state["offset"] = list(auto["offset"])
+            zoom_var.set((state["scale"] / initial_scale) * 100 if initial_scale > 0 else 100)
+            redraw()
+
         ttk.Button(button_row, text="Save 4x6 PNG", command=save_button_sheet).pack(side=tk.LEFT, padx=4)
         ttk.Button(button_row, text="Print", command=print_button_sheet).pack(side=tk.LEFT, padx=4)
         ttk.Button(button_row, text="Add to Queue", command=add_button_to_queue).pack(side=tk.LEFT, padx=4)
+        ttk.Button(button_row, text="Auto Fit", command=apply_auto_fit).pack(side=tk.LEFT, padx=4)
         ttk.Button(button_row, text="Save Template", command=save_template).pack(side=tk.LEFT, padx=4)
         ttk.Button(button_row, text="Load Template", command=load_template).pack(side=tk.LEFT, padx=4)
         ttk.Button(button_row, text="Close", command=top.destroy).pack(side=tk.RIGHT, padx=4)
 
         redraw()
 
-    def open_button_print_editor_from_specs(self, specs: dict) -> None:
+    def open_button_print_editor_from_specs(self, specs: dict, queue_item_id: int | None = None) -> None:
         """Reopen the button designer with a saved spec dict restored.
 
         *specs* is the ``button_specs`` dict persisted in a queue item's
@@ -2086,8 +2099,9 @@ class SytistDashboard:
         sheet_w, sheet_h = BUTTON_PRINT_SIZE
         initial_scale = max(crop_w / source_img.width, crop_h / source_img.height)
 
-        saved_scale = specs.get("scale", initial_scale)
-        saved_offset = specs.get("offset", None)
+        auto_crop = suggest_button_autocrop(source_img, crop_size=BUTTON_CROP_SIZE)
+        saved_scale = specs.get("scale", auto_crop.get("scale") if auto_crop else initial_scale)
+        saved_offset = specs.get("offset", auto_crop.get("offset") if auto_crop else None)
         if saved_offset is None:
             resized_w = round(source_img.width * initial_scale)
             resized_h = round(source_img.height * initial_scale)
@@ -2396,6 +2410,14 @@ class SytistDashboard:
 
         def print_button_from_specs():
             new_specs = _collect_button_specs_2()
+            if queue_item_id is not None:
+                self._apply_button_specs_to_queue_item(queue_item_id, new_specs)
+                messagebox.showinfo(
+                    "Updated",
+                    f"Button design saved onto queue item ID {queue_item_id}.",
+                    parent=top,
+                )
+                return
             item_id = self.print_queue_store.enqueue(
                 source_type="button",
                 source=state.get("image_path", ""),
@@ -2410,6 +2432,16 @@ class SytistDashboard:
                 "Open Print Queue when you are ready to print it.",
                 parent=top,
             )
+
+        def apply_auto_fit_specs():
+            auto = suggest_button_autocrop(source_img, crop_size=BUTTON_CROP_SIZE)
+            if not auto:
+                messagebox.showinfo("Auto Fit", "No face landmarks were detected. Keeping current framing.", parent=top)
+                return
+            state["scale"] = auto["scale"]
+            state["offset"] = list(auto["offset"])
+            zoom_var.set((state["scale"] / initial_scale) * 100 if initial_scale > 0 else 100)
+            redraw_specs()
 
         def save_button_from_specs():
             default_name = f"{os.path.splitext(state['image_name'])[0]}_button_4x6.png"
@@ -2428,7 +2460,8 @@ class SytistDashboard:
                 messagebox.showerror("Save Error", f"Could not save button print:\n{exc}")
 
         ttk.Button(button_row2, text="Save 4x6 PNG", command=save_button_from_specs).pack(side=tk.LEFT, padx=4)
-        ttk.Button(button_row2, text="Print", command=print_button_from_specs).pack(side=tk.LEFT, padx=4)
+        ttk.Button(button_row2, text=("Apply to Queue" if queue_item_id is not None else "Print"), command=print_button_from_specs).pack(side=tk.LEFT, padx=4)
+        ttk.Button(button_row2, text="Auto Fit", command=apply_auto_fit_specs).pack(side=tk.LEFT, padx=4)
         ttk.Button(button_row2, text="Close", command=top.destroy).pack(side=tk.RIGHT, padx=4)
 
         redraw_specs()
@@ -2494,6 +2527,56 @@ class SytistDashboard:
         item.render_settings = settings
         return local_path
 
+    @staticmethod
+    def _queue_item_match_source(item) -> str:
+        settings = dict(item.render_settings or {})
+        specs = dict(settings.get("button_specs") or {})
+        source = item.source or settings.get("prepared_image_path") or specs.get("image_path") or ""
+        source = str(source or "").strip()
+        if source and not source.lower().startswith(("http://", "https://")):
+            source = os.path.normcase(os.path.abspath(source))
+        return source
+
+    def _find_prior_button_design_match(self, item):
+        if not item or not item.id:
+            return None
+        target_product = str(item.product or "").strip().lower()
+        target_source = self._queue_item_match_source(item)
+        if not target_source:
+            return None
+        matches = []
+        for candidate in self.print_queue_store.get_all():
+            if not candidate.id or candidate.id >= item.id:
+                continue
+            candidate_specs = dict((candidate.render_settings or {}).get("button_specs") or {})
+            if not candidate_specs:
+                continue
+            if str(candidate.product or "").strip().lower() != target_product:
+                continue
+            if self._queue_item_match_source(candidate) != target_source:
+                continue
+            matches.append(candidate)
+        if not matches:
+            return None
+        return max(matches, key=lambda qi: qi.id or 0)
+
+    def _apply_button_specs_to_queue_item(self, item_id: int, specs: dict) -> None:
+        item = self.print_queue_store.get_item(item_id)
+        if not item:
+            return
+        settings = dict(item.render_settings or {})
+        new_specs = dict(specs or {})
+        image_path = str(new_specs.get("image_path") or "")
+        if image_path:
+            settings["prepared_image_path"] = image_path
+        settings["button_specs"] = new_specs
+        self.print_queue_store.apply_button_design(
+            item_id,
+            render_settings=settings,
+            product=item.product or "Button",
+            size_key="button",
+        )
+
     def _open_button_editor_for_queue_item(self, item_id: int) -> None:
         item = self.print_queue_store.get_item(item_id)
         if not item:
@@ -2509,8 +2592,23 @@ class SytistDashboard:
             return
 
         specs = dict((item.render_settings or {}).get("button_specs") or {})
+        if not specs:
+            prior_item = self._find_prior_button_design_match(item)
+            if prior_item:
+                action = messagebox.askyesnocancel(
+                    "Reuse Prior Button Design",
+                    f"Queue item {prior_item.id} already has a button design for this product/image.\n\n"
+                    "Yes = Reuse prior design\nNo = Start fresh\nCancel = Do nothing",
+                    parent=self.root,
+                )
+                if action is None:
+                    return
+                if action:
+                    specs = dict((prior_item.render_settings or {}).get("button_specs") or {})
+                    specs["image_path"] = image_path
+                    self._apply_button_specs_to_queue_item(item_id, specs)
         specs["image_path"] = image_path
-        self.open_button_print_editor_from_specs(specs)
+        self.open_button_print_editor_from_specs(specs, queue_item_id=item_id)
 
     def _prompt_regular_print_size(self) -> str | None:
         chosen_type = self.dialogs.ask_image_print_type()
@@ -2849,6 +2947,8 @@ class SytistDashboard:
         tree_frame.columnconfigure(0, weight=1)
 
         # Tag colours for status
+        tree.tag_configure("designed", foreground="#1f4fb2")
+        tree.tag_configure("requeued", foreground="#8a5a00")
         tree.tag_configure("printed", foreground="#1a7a1a")
         tree.tag_configure("failed", foreground="#b00000")
         tree.tag_configure("archived", foreground="#888888")

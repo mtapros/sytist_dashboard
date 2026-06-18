@@ -10,6 +10,9 @@ mysql-connector-python>=8.0.0
 # Image preview in the UI and direct-print rendering
 Pillow>=10.0.0
 
+# Optional: MediaPipe-powered initial auto-fit suggestion in button designer
+mediapipe>=0.10.0
+
 # Direct printing via the Windows GDI spooler (Windows only)
 pywin32>=306
 
